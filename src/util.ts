@@ -74,7 +74,7 @@ export function preferLocalBin(
 
 export function quote(arg: string): string {
   if (arg === '') return `$''`
-  if (/^[\w/.\-@:=]+$/.test(arg)) return arg
+  if (/^[\w/.\-+@:=,%]+$/.test(arg)) return arg
 
   return (
     `$'` +
@@ -93,17 +93,13 @@ export function quote(arg: string): string {
 
 export function quotePowerShell(arg: string): string {
   if (arg === '') return `''`
-  if (/^[\w/.\-]+$/.test(arg)) return arg
+  if (/^[\w/.\-@:=,+%]+$/.test(arg)) return arg
 
   return `'` + arg.replace(/'/g, "''") + `'`
 }
 
 export type Duration =
-  | number
-  | `${number}`
-  | `${number}m`
-  | `${number}s`
-  | `${number}ms`
+  number | `${number}` | `${number}m` | `${number}s` | `${number}ms`
 
 export function parseDuration(d: Duration) {
   if (typeof d === 'number') {

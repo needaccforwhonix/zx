@@ -285,6 +285,8 @@ console.log(a);
     const server = await fakeServer([`HTTP/1.1 500\n\n500\n`]).listen(port)
     const out = await $`node build/cli.js http://127.0.0.1:${port}`.nothrow()
     assert.match(out.stderr, /Error: Can't get/)
+    assert.match(out.stderr, /Failed to fetch remote script/)
+    assert.equal(out.exitCode, 1)
     await server.stop()
   })
 
@@ -345,6 +347,12 @@ console.log(a);
   test('markdown scripts are working for CRLF', async () => {
     const p = await $`node build/cli.js test/fixtures/markdown-crlf.md`
     assert.ok(p.stdout.includes('Hello, world!'))
+  })
+
+  test('markdown scripts from stdin with --ext .md', async () => {
+    const md = '# Test\n\n```js\necho("md-stdin-ok")\n```\n'
+    const p = await $`node build/cli.js --ext='.md' <<< ${md}`
+    assert.match(p.stdout, /md-stdin-ok/)
   })
 
   test('exceptions are caught', async () => {

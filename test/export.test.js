@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -141,6 +141,7 @@ describe('cli', () => {
     assert.equal(typeof cli.argv.v, 'boolean', 'cli.argv.v')
     assert.equal(typeof cli.argv.verbose, 'boolean', 'cli.argv.verbose')
     assert.equal(typeof cli.argv.version, 'boolean', 'cli.argv.version')
+    assert.equal(typeof cli.autorun, 'function', 'cli.autorun')
     assert.equal(typeof cli.injectGlobalRequire, 'function', 'cli.injectGlobalRequire')
     assert.equal(typeof cli.isMain, 'function', 'cli.isMain')
     assert.equal(typeof cli.main, 'function', 'cli.main')

@@ -71,12 +71,20 @@ describe('util', () => {
     assert.ok(quote('string') === 'string')
     assert.ok(quote('') === `$''`)
     assert.ok(quote(`'\f\n\r\t\v\0`) === `$'\\'\\f\\n\\r\\t\\v\\0'`)
+
+    const allowed =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/.-+@:=,%'
+    assert.equal(quote(allowed), allowed)
   })
 
   test('quotePowerShell()', () => {
     assert.equal(quotePowerShell('string'), 'string')
     assert.equal(quotePowerShell(`'`), `''''`)
     assert.equal(quotePowerShell(''), `''`)
+
+    const allowed =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/.-+@:=,%'
+    assert.equal(quote(allowed), allowed)
   })
 
   test('duration parsing works', () => {

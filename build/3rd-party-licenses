@@ -20,7 +20,7 @@ THIRD PARTY LICENSES
   sindresorhus/merge-streams
   MIT
 
-@webpod/ps@1.0.0
+@webpod/ps@1.2.1
   <unknown>
   git://github.com/webpod/ps.git
   MIT
@@ -50,7 +50,7 @@ fast-glob@3.3.3
   mrmlnc/fast-glob
   MIT
 
-fastq@1.19.1
+fastq@1.20.1
   Matteo Collina <hello@matteocollina.com>
   git+https://github.com/mcollina/fastq.git
   ISC
@@ -60,9 +60,9 @@ fill-range@7.1.1
   jonschlinkert/fill-range
   MIT
 
-fs-extra@11.3.2
+fs-extra@11.3.5
   JP Richardson <jprichardson@gmail.com>
-  https://github.com/jprichardson/node-fs-extra
+  git+https://github.com/jprichardson/node-fs-extra.git
   MIT
 
 glob-parent@5.1.2
@@ -70,7 +70,7 @@ glob-parent@5.1.2
   gulpjs/glob-parent
   ISC
 
-globby@16.0.0
+globby@16.2.0
   Sindre Sorhus <sindresorhus@gmail.com>
   sindresorhus/globby
   MIT
@@ -90,19 +90,14 @@ is-path-inside@4.0.0
   sindresorhus/is-path-inside
   MIT
 
-isexe@3.1.1
+isexe@4.0.0
   Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/)
   https://github.com/isaacs/isexe
-  ISC
+  BlueOak-1.0.0
 
-jsonfile@6.1.0
+jsonfile@6.2.0
   JP Richardson <jprichardson@gmail.com>
   git@github.com:jprichardson/node-jsonfile.git
-  MIT
-
-maml.js@0.0.3
-  Anton Medvedev <anton@medv.io>
-  git+https://github.com/maml-dev/maml.js.git
   MIT
 
 merge2@1.4.1
@@ -120,7 +115,7 @@ node-fetch-native@1.6.7
   unjs/node-fetch-native
   MIT
 
-picomatch@2.3.1
+picomatch@2.3.2
   Jon Schlinkert (https://github.com/jonschlinkert)
   micromatch/picomatch
   MIT
@@ -140,12 +135,12 @@ unicorn-magic@0.4.0
   sindresorhus/unicorn-magic
   MIT
 
-which@6.0.0
+which@7.0.0
   GitHub Inc.
   git+https://github.com/npm/node-which.git
   ISC
 
-yaml@2.8.2
+yaml@2.9.0
   Eemeli Aro <eemeli@gmail.com>
   github:eemeli/yaml
   ISC

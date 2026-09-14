@@ -45,14 +45,13 @@ See also [**zx@lite**](https://google.github.io/zx/lite).
     * Bun >= 1.0.0
     * Deno 1.x, 2.x
     * GraalVM Node.js
-* Some kind of [bash or PowerShell](https://google.github.io/zx/shell)
+* [Bash or PowerShell](https://google.github.io/zx/shell)
 * [Both CJS or ESM](https://google.github.io/zx/setup#hybrid) modules in [JS or TS](https://google.github.io/zx/typescript)
 
 
 ## See also
 
-- [srf](https://github.com/antonmedv/srf) — a tiny, dependency-free static file server for Node.js
-- [fx](https://fx.wtf) — a JSON cli tool and terminal JSON viewer 
+- [MAML](https://maml.dev) — JSON for config, with comments, multiline strings, unquoted keys, and optional commas.
 
 ## License
 

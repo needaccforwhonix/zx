@@ -1,5 +1,6 @@
 "use strict";
 const {
+  __pow,
   __spreadValues,
   __spreadProps,
   __esm,
@@ -89,9 +90,9 @@ var require_path = __commonJS({
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.convertPosixPathToPattern = exports2.convertWindowsPathToPattern = exports2.convertPathToPattern = exports2.escapePosixPath = exports2.escapeWindowsPath = exports2.escape = exports2.removeLeadingDotSegment = exports2.makeAbsolute = exports2.unixify = void 0;
-    var os = require("os");
+    var os2 = require("os");
     var path5 = require("path");
-    var IS_WINDOWS_PLATFORM = os.platform() === "win32";
+    var IS_WINDOWS_PLATFORM = os2.platform() === "win32";
     var LEADING_DOT_SEGMENT_CHARACTERS_COUNT = 2;
     var POSIX_UNESCAPED_GLOB_SYMBOLS_RE = /(\\?)([()*?[\]{|}]|^!|[!+@](?=\()|\\(?![!()*+?@[\]{|}]))/g;
     var WINDOWS_UNESCAPED_GLOB_SYMBOLS_RE = /(\\?)([()[\]{}]|^!|[!+@](?=\())/g;
@@ -1404,6 +1405,7 @@ var require_constants2 = __commonJS({
     var path5 = require("path");
     var WIN_SLASH = "\\\\/";
     var WIN_NO_SLASH = `[^${WIN_SLASH}]`;
+    var DEFAULT_MAX_EXTGLOB_RECURSION = 0;
     var DOT_LITERAL = "\\.";
     var PLUS_LITERAL = "\\+";
     var QMARK_LITERAL = "\\?";
@@ -1450,6 +1452,7 @@ var require_constants2 = __commonJS({
       END_ANCHOR: `(?:[${WIN_SLASH}]|$)`
     });
     var POSIX_REGEX_SOURCE = {
+      __proto__: null,
       alnum: "a-zA-Z0-9",
       alpha: "a-zA-Z",
       ascii: "\\x00-\\x7F",
@@ -1466,6 +1469,7 @@ var require_constants2 = __commonJS({
       xdigit: "A-Fa-f0-9"
     };
     module2.exports = {
+      DEFAULT_MAX_EXTGLOB_RECURSION,
       MAX_LENGTH: 1024 * 64,
       POSIX_REGEX_SOURCE,
       // regular expressions
@@ -1477,6 +1481,7 @@ var require_constants2 = __commonJS({
       REGEX_REMOVE_BACKSLASH: /(?:\[.*?[^\\]\]|\\(?=.))/g,
       // Replace globs with equivalent patterns to reduce parsing time.
       REPLACEMENTS: {
+        __proto__: null,
         "***": "*",
         "**/**": "**",
         "**/**/**": "**"
@@ -2013,6 +2018,213 @@ var require_parse2 = __commonJS({
     var syntaxError = (type, char) => {
       return `Missing ${type}: "${char}" - use "\\\\${char}" to match literal characters`;
     };
+    var splitTopLevel = (input) => {
+      const parts = [];
+      let bracket = 0;
+      let paren = 0;
+      let quote = 0;
+      let value = "";
+      let escaped = false;
+      for (const ch of input) {
+        if (escaped === true) {
+          value += ch;
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          value += ch;
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          quote = quote === 1 ? 0 : 1;
+          value += ch;
+          continue;
+        }
+        if (quote === 0) {
+          if (ch === "[") {
+            bracket++;
+          } else if (ch === "]" && bracket > 0) {
+            bracket--;
+          } else if (bracket === 0) {
+            if (ch === "(") {
+              paren++;
+            } else if (ch === ")" && paren > 0) {
+              paren--;
+            } else if (ch === "|" && paren === 0) {
+              parts.push(value);
+              value = "";
+              continue;
+            }
+          }
+        }
+        value += ch;
+      }
+      parts.push(value);
+      return parts;
+    };
+    var isPlainBranch = (branch) => {
+      let escaped = false;
+      for (const ch of branch) {
+        if (escaped === true) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (/[?*+@!()[\]{}]/.test(ch)) {
+          return false;
+        }
+      }
+      return true;
+    };
+    var normalizeSimpleBranch = (branch) => {
+      let value = branch.trim();
+      let changed = true;
+      while (changed === true) {
+        changed = false;
+        if (/^@\([^\\()[\]{}|]+\)$/.test(value)) {
+          value = value.slice(2, -1);
+          changed = true;
+        }
+      }
+      if (!isPlainBranch(value)) {
+        return;
+      }
+      return value.replace(/\\(.)/g, "$1");
+    };
+    var hasRepeatedCharPrefixOverlap = (branches) => {
+      const values = branches.map(normalizeSimpleBranch).filter(Boolean);
+      for (let i = 0; i < values.length; i++) {
+        for (let j = i + 1; j < values.length; j++) {
+          const a = values[i];
+          const b = values[j];
+          const char = a[0];
+          if (!char || a !== char.repeat(a.length) || b !== char.repeat(b.length)) {
+            continue;
+          }
+          if (a === b || a.startsWith(b) || b.startsWith(a)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    var parseRepeatedExtglob = (pattern, requireEnd = true) => {
+      if (pattern[0] !== "+" && pattern[0] !== "*" || pattern[1] !== "(") {
+        return;
+      }
+      let bracket = 0;
+      let paren = 0;
+      let quote = 0;
+      let escaped = false;
+      for (let i = 1; i < pattern.length; i++) {
+        const ch = pattern[i];
+        if (escaped === true) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          quote = quote === 1 ? 0 : 1;
+          continue;
+        }
+        if (quote === 1) {
+          continue;
+        }
+        if (ch === "[") {
+          bracket++;
+          continue;
+        }
+        if (ch === "]" && bracket > 0) {
+          bracket--;
+          continue;
+        }
+        if (bracket > 0) {
+          continue;
+        }
+        if (ch === "(") {
+          paren++;
+          continue;
+        }
+        if (ch === ")") {
+          paren--;
+          if (paren === 0) {
+            if (requireEnd === true && i !== pattern.length - 1) {
+              return;
+            }
+            return {
+              type: pattern[0],
+              body: pattern.slice(2, i),
+              end: i
+            };
+          }
+        }
+      }
+    };
+    var getStarExtglobSequenceOutput = (pattern) => {
+      let index = 0;
+      const chars = [];
+      while (index < pattern.length) {
+        const match = parseRepeatedExtglob(pattern.slice(index), false);
+        if (!match || match.type !== "*") {
+          return;
+        }
+        const branches = splitTopLevel(match.body).map((branch2) => branch2.trim());
+        if (branches.length !== 1) {
+          return;
+        }
+        const branch = normalizeSimpleBranch(branches[0]);
+        if (!branch || branch.length !== 1) {
+          return;
+        }
+        chars.push(branch);
+        index += match.end + 1;
+      }
+      if (chars.length < 1) {
+        return;
+      }
+      const source = chars.length === 1 ? utils.escapeRegex(chars[0]) : `[${chars.map((ch) => utils.escapeRegex(ch)).join("")}]`;
+      return `${source}*`;
+    };
+    var repeatedExtglobRecursion = (pattern) => {
+      let depth = 0;
+      let value = pattern.trim();
+      let match = parseRepeatedExtglob(value);
+      while (match) {
+        depth++;
+        value = match.body.trim();
+        match = parseRepeatedExtglob(value);
+      }
+      return depth;
+    };
+    var analyzeRepeatedExtglob = (body, options) => {
+      if (options.maxExtglobRecursion === false) {
+        return { risky: false };
+      }
+      const max = typeof options.maxExtglobRecursion === "number" ? options.maxExtglobRecursion : constants.DEFAULT_MAX_EXTGLOB_RECURSION;
+      const branches = splitTopLevel(body).map((branch) => branch.trim());
+      if (branches.length > 1) {
+        if (branches.some((branch) => branch === "") || branches.some((branch) => /^[*?]+$/.test(branch)) || hasRepeatedCharPrefixOverlap(branches)) {
+          return { risky: true };
+        }
+      }
+      for (const branch of branches) {
+        const safeOutput = getStarExtglobSequenceOutput(branch);
+        if (safeOutput) {
+          return { risky: true, safeOutput };
+        }
+        if (repeatedExtglobRecursion(branch) > max) {
+          return { risky: true };
+        }
+      }
+      return { risky: false };
+    };
     var parse4 = (input, options) => {
       if (typeof input !== "string") {
         throw new TypeError("Expected a string");
@@ -2144,6 +2356,8 @@ var require_parse2 = __commonJS({
         token.prev = prev;
         token.parens = state.parens;
         token.output = state.output;
+        token.startIndex = state.index;
+        token.tokensIndex = tokens.length;
         const output = (opts.capture ? "(" : "") + token.open;
         increment("parens");
         push({ type, value: value2, output: state.output ? "" : ONE_CHAR });
@@ -2151,6 +2365,26 @@ var require_parse2 = __commonJS({
         extglobs.push(token);
       };
       const extglobClose = (token) => {
+        const literal = input.slice(token.startIndex, state.index + 1);
+        const body = input.slice(token.startIndex + 2, state.index);
+        const analysis = analyzeRepeatedExtglob(body, opts);
+        if ((token.type === "plus" || token.type === "star") && analysis.risky) {
+          const safeOutput = analysis.safeOutput ? (token.output ? "" : ONE_CHAR) + (opts.capture ? `(${analysis.safeOutput})` : analysis.safeOutput) : void 0;
+          const open = tokens[token.tokensIndex];
+          open.type = "text";
+          open.value = literal;
+          open.output = safeOutput || utils.escapeRegex(literal);
+          for (let i = token.tokensIndex + 1; i < tokens.length; i++) {
+            tokens[i].value = "";
+            tokens[i].output = "";
+            delete tokens[i].suffix;
+          }
+          state.output = token.output + open.output;
+          state.backtrack = true;
+          push({ type: "paren", extglob: true, value, output: "" });
+          decrement("parens");
+          return;
+        }
         let output = token.close + (opts.capture ? ")" : "");
         let rest;
         if (token.type === "negate") {
@@ -4126,7 +4360,8 @@ var require_queue = __commonJS({
         empty: noop2,
         kill,
         killAndDrain,
-        error
+        error,
+        abort
       };
       return self2;
       function running() {
@@ -4243,6 +4478,28 @@ var require_queue = __commonJS({
         queueHead = null;
         queueTail = null;
         self2.drain();
+        self2.drain = noop2;
+      }
+      function abort() {
+        var current = queueHead;
+        queueHead = null;
+        queueTail = null;
+        while (current) {
+          var next = current.next;
+          var callback = current.callback;
+          var errorHandler2 = current.errorHandler;
+          var val = current.value;
+          var context2 = current.context;
+          current.value = null;
+          current.callback = noop2;
+          current.errorHandler = null;
+          if (errorHandler2) {
+            errorHandler2(new Error("abort"), val);
+          }
+          callback.call(context2, new Error("abort"));
+          current.release(current);
+          current = next;
+        }
         self2.drain = noop2;
       }
       function error(handler) {
@@ -5360,8 +5617,8 @@ var require_settings4 = __commonJS({
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.DEFAULT_FILE_SYSTEM_ADAPTER = void 0;
     var fs6 = require("fs");
-    var os = require("os");
-    var CPU_COUNT = Math.max(os.cpus().length, 1);
+    var os2 = require("os");
+    var CPU_COUNT = Math.max(os2.cpus().length, 1);
     exports2.DEFAULT_FILE_SYSTEM_ADAPTER = {
       lstat: fs6.lstat,
       lstatSync: fs6.lstatSync,
@@ -5537,7 +5794,7 @@ var require_ignore = __commonJS({
     var SLASH = "/";
     var TMP_KEY_IGNORE = "node-ignore";
     if (typeof Symbol !== "undefined") {
-      TMP_KEY_IGNORE = Symbol.for("node-ignore");
+      TMP_KEY_IGNORE = /* @__PURE__ */ Symbol.for("node-ignore");
     }
     var KEY_IGNORE = TMP_KEY_IGNORE;
     var define = (object, key, value) => {
@@ -5970,7 +6227,7 @@ var require_ignore = __commonJS({
     module2.exports = factory;
     factory.default = factory;
     module2.exports.isPathValid = isPathValid;
-    define(module2.exports, Symbol.for("setupWindows"), setupWindows);
+    define(module2.exports, /* @__PURE__ */ Symbol.for("setupWindows"), setupWindows);
   }
 });
 
@@ -6423,8 +6680,8 @@ var require_graceful_fs = __commonJS({
     var gracefulQueue;
     var previousSymbol;
     if (typeof Symbol === "function" && typeof Symbol.for === "function") {
-      gracefulQueue = Symbol.for("graceful-fs.queue");
-      previousSymbol = Symbol.for("graceful-fs.previous");
+      gracefulQueue = /* @__PURE__ */ Symbol.for("graceful-fs.queue");
+      previousSymbol = /* @__PURE__ */ Symbol.for("graceful-fs.previous");
     } else {
       gracefulQueue = "___graceful-fs.queue";
       previousSymbol = "___graceful-fs.previous";
@@ -6988,25 +7245,40 @@ var require_utimes = __commonJS({
     function utimesMillis(path5, atime, mtime) {
       return __async(this, null, function* () {
         const fd = yield fs6.open(path5, "r+");
-        let closeErr = null;
+        let error = null;
         try {
           yield fs6.futimes(fd, atime, mtime);
+        } catch (futimesErr) {
+          error = futimesErr;
         } finally {
           try {
             yield fs6.close(fd);
-          } catch (e) {
-            closeErr = e;
+          } catch (closeErr) {
+            if (!error) error = closeErr;
           }
         }
-        if (closeErr) {
-          throw closeErr;
+        if (error) {
+          throw error;
         }
       });
     }
     function utimesMillisSync(path5, atime, mtime) {
       const fd = fs6.openSync(path5, "r+");
-      fs6.futimesSync(fd, atime, mtime);
-      return fs6.closeSync(fd);
+      let error = null;
+      try {
+        fs6.futimesSync(fd, atime, mtime);
+      } catch (futimesErr) {
+        error = futimesErr;
+      } finally {
+        try {
+          fs6.closeSync(fd);
+        } catch (closeErr) {
+          if (!error) error = closeErr;
+        }
+      }
+      if (error) {
+        throw error;
+      }
     }
     module2.exports = {
       utimesMillis: u(utimesMillis),
@@ -7317,11 +7589,13 @@ var require_copy = __commonJS({
         if (opts.dereference) {
           resolvedDest = path5.resolve(process.cwd(), resolvedDest);
         }
-        if (stat.isSrcSubdir(resolvedSrc, resolvedDest)) {
-          throw new Error(`Cannot copy '${resolvedSrc}' to a subdirectory of itself, '${resolvedDest}'.`);
-        }
-        if (stat.isSrcSubdir(resolvedDest, resolvedSrc)) {
-          throw new Error(`Cannot overwrite '${resolvedDest}' with '${resolvedSrc}'.`);
+        if (resolvedSrc !== resolvedDest) {
+          if (stat.isSrcSubdir(resolvedSrc, resolvedDest)) {
+            throw new Error(`Cannot copy '${resolvedSrc}' to a subdirectory of itself, '${resolvedDest}'.`);
+          }
+          if (stat.isSrcSubdir(resolvedDest, resolvedSrc)) {
+            throw new Error(`Cannot overwrite '${resolvedDest}' with '${resolvedSrc}'.`);
+          }
         }
         yield fs6.unlink(dest);
         return fs6.symlink(resolvedSrc, dest);
@@ -7450,11 +7724,13 @@ var require_copy_sync = __commonJS({
         if (opts.dereference) {
           resolvedDest = path5.resolve(process.cwd(), resolvedDest);
         }
-        if (stat.isSrcSubdir(resolvedSrc, resolvedDest)) {
-          throw new Error(`Cannot copy '${resolvedSrc}' to a subdirectory of itself, '${resolvedDest}'.`);
-        }
-        if (stat.isSrcSubdir(resolvedDest, resolvedSrc)) {
-          throw new Error(`Cannot overwrite '${resolvedDest}' with '${resolvedSrc}'.`);
+        if (resolvedSrc !== resolvedDest) {
+          if (stat.isSrcSubdir(resolvedSrc, resolvedDest)) {
+            throw new Error(`Cannot copy '${resolvedSrc}' to a subdirectory of itself, '${resolvedDest}'.`);
+          }
+          if (stat.isSrcSubdir(resolvedDest, resolvedSrc)) {
+            throw new Error(`Cannot overwrite '${resolvedDest}' with '${resolvedSrc}'.`);
+          }
         }
         return copyLink(resolvedSrc, dest);
       }
@@ -7614,12 +7890,12 @@ var require_link = __commonJS({
       return __async(this, null, function* () {
         let dstStat;
         try {
-          dstStat = yield fs6.lstat(dstpath);
+          dstStat = yield fs6.lstat(dstpath, { bigint: true });
         } catch (e) {
         }
         let srcStat;
         try {
-          srcStat = yield fs6.lstat(srcpath);
+          srcStat = yield fs6.lstat(srcpath, { bigint: true });
         } catch (err) {
           err.message = err.message.replace("lstat", "ensureLink");
           throw err;
@@ -7636,11 +7912,11 @@ var require_link = __commonJS({
     function createLinkSync(srcpath, dstpath) {
       let dstStat;
       try {
-        dstStat = fs6.lstatSync(dstpath);
+        dstStat = fs6.lstatSync(dstpath, { bigint: true });
       } catch (e) {
       }
       try {
-        const srcStat = fs6.lstatSync(srcpath);
+        const srcStat = fs6.lstatSync(srcpath, { bigint: true });
         if (dstStat && areIdentical(srcStat, dstStat)) return;
       } catch (err) {
         err.message = err.message.replace("lstat", "ensureLink");
@@ -7789,10 +8065,19 @@ var require_symlink = __commonJS({
         } catch (e) {
         }
         if (stats && stats.isSymbolicLink()) {
-          const [srcStat, dstStat] = yield Promise.all([
-            fs6.stat(srcpath),
-            fs6.stat(dstpath)
-          ]);
+          let srcStat;
+          if (path5.isAbsolute(srcpath)) {
+            srcStat = yield fs6.stat(srcpath, { bigint: true });
+          } else {
+            const dstdir = path5.dirname(dstpath);
+            const relativeToDst = path5.join(dstdir, srcpath);
+            try {
+              srcStat = yield fs6.stat(relativeToDst, { bigint: true });
+            } catch (e) {
+              srcStat = yield fs6.stat(srcpath, { bigint: true });
+            }
+          }
+          const dstStat = yield fs6.stat(dstpath, { bigint: true });
           if (areIdentical(srcStat, dstStat)) return;
         }
         const relative = yield symlinkPaths(srcpath, dstpath);
@@ -7812,8 +8097,19 @@ var require_symlink = __commonJS({
       } catch (e) {
       }
       if (stats && stats.isSymbolicLink()) {
-        const srcStat = fs6.statSync(srcpath);
-        const dstStat = fs6.statSync(dstpath);
+        let srcStat;
+        if (path5.isAbsolute(srcpath)) {
+          srcStat = fs6.statSync(srcpath, { bigint: true });
+        } else {
+          const dstdir = path5.dirname(dstpath);
+          const relativeToDst = path5.join(dstdir, srcpath);
+          try {
+            srcStat = fs6.statSync(relativeToDst, { bigint: true });
+          } catch (e) {
+            srcStat = fs6.statSync(srcpath, { bigint: true });
+          }
+        }
+        const dstStat = fs6.statSync(dstpath, { bigint: true });
         if (areIdentical(srcStat, dstStat)) return;
       }
       const relative = symlinkPathsSync(srcpath, dstpath);
@@ -7944,13 +8240,12 @@ var require_jsonfile = __commonJS({
       const str = stringify6(obj, options);
       return fs6.writeFileSync(file, str, options);
     }
-    var jsonfile = {
+    module2.exports = {
       readFile,
       readFileSync,
       writeFile,
       writeFileSync
     };
-    module2.exports = jsonfile;
   }
 });
 
@@ -8550,7 +8845,7 @@ function Ns() {
       };
       n2(bn, "SimpleQueue");
       let D2 = bn;
-      const jt = Symbol("[[AbortSteps]]"), Qn = Symbol("[[ErrorSteps]]"), Ar = Symbol("[[CancelSteps]]"), Br = Symbol("[[PullSteps]]"), kr = Symbol("[[ReleaseSteps]]");
+      const jt = /* @__PURE__ */ Symbol("[[AbortSteps]]"), Qn = /* @__PURE__ */ Symbol("[[ErrorSteps]]"), Ar = /* @__PURE__ */ Symbol("[[CancelSteps]]"), Br = /* @__PURE__ */ Symbol("[[PullSteps]]"), kr = /* @__PURE__ */ Symbol("[[ReleaseSteps]]");
       function Yn(e, t3) {
         e._ownerReadableStream = t3, t3._reader = e, t3._state === "readable" ? qr(e) : t3._state === "closed" ? xi(e) : Gn(e, t3._storedError);
       }
@@ -10127,10 +10422,10 @@ function Ns() {
       }
       n2(ar, "defaultControllerBrandCheckException$1");
       function ns(e, t3) {
-        return Ie(e._readableStreamController) ? is(e) : os(e);
+        return Ie(e._readableStreamController) ? is(e) : os2(e);
       }
       n2(ns, "ReadableStreamTee");
-      function os(e, t3) {
+      function os2(e, t3) {
         const r2 = Qe(e);
         let s = false, u = false, c2 = false, d = false, m2, R3, y, C2, P2;
         const B2 = A((x2) => {
@@ -10170,7 +10465,7 @@ function Ns() {
         }
         return n2(Te, "startAlgorithm"), y = Et(Te, ae, nt), C2 = Et(Te, ae, Oe), I2(r2._closedPromise, (x2) => (oe(y._readableStreamController, x2), oe(C2._readableStreamController, x2), (!c2 || !d) && P2(void 0), null)), [y, C2];
       }
-      n2(os, "ReadableStreamDefaultTee");
+      n2(os2, "ReadableStreamDefaultTee");
       function is(e) {
         let t3 = Qe(e), r2 = false, s = false, u = false, c2 = false, d = false, m2, R3, y, C2, P2;
         const B2 = A((_) => {
@@ -11537,7 +11832,7 @@ var init_node = __esm({
       return a === f2;
     }, "isSameProtocol");
     el = (0, import_node_util3.promisify)(import_node_stream3.default.pipeline);
-    H = Symbol("Body internals");
+    H = /* @__PURE__ */ Symbol("Body internals");
     Nn = class Nn2 {
       constructor(o3, { size: a = 0 } = {}) {
         let f2 = null;
@@ -11688,7 +11983,7 @@ var init_node = __esm({
       raw() {
         return [...this.keys()].reduce((o3, a) => (o3[a] = this.getAll(a), o3), {});
       }
-      [Symbol.for("nodejs.util.inspect.custom")]() {
+      [/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")]() {
         return [...this.keys()].reduce((o3, a) => {
           const f2 = this.getAll(a);
           return a === "host" ? o3[a] = f2[0] : o3[a] = f2.length > 1 ? f2 : f2[0], o3;
@@ -11701,7 +11996,7 @@ var init_node = __esm({
     n2(ol, "fromRawHeaders");
     il = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
     jn = n2((i) => il.has(i), "isRedirect");
-    se = Symbol("Response internals");
+    se = /* @__PURE__ */ Symbol("Response internals");
     Ne = class Ne2 extends xe {
       constructor(o3 = null, a = {}) {
         super(o3, a);
@@ -11773,7 +12068,7 @@ var init_node = __esm({
     n2(ct, "isUrlPotentiallyTrustworthy");
     n2(fl, "determineRequestsReferrer");
     n2(cl, "parseReferrerPolicyFromHeader");
-    $2 = Symbol("Request internals");
+    $2 = /* @__PURE__ */ Symbol("Request internals");
     qt = n2((i) => typeof i == "object" && typeof i[$2] == "object", "isRequest");
     dl = (0, import_node_util3.deprecate)(() => {
     }, ".data is not a valid RequestInit property, use .body instead", "https://github.com/node-fetch/node-fetch/issues/1000 (request)");
@@ -11847,7 +12142,7 @@ var init_node = __esm({
       f2 && a.set("Content-Length", f2), i.referrerPolicy === "" && (i.referrerPolicy = sl), i.referrer && i.referrer !== "no-referrer" ? i[$2].referrer = fl(i) : i[$2].referrer = "no-referrer", i[$2].referrer instanceof URL && a.set("Referer", i.referrer), a.has("User-Agent") || a.set("User-Agent", "node-fetch"), i.compress && !a.has("Accept-Encoding") && a.set("Accept-Encoding", "gzip, deflate, br");
       let { agent: l } = i;
       typeof l == "function" && (l = l(o3));
-      const p2 = al(o3), h2 = { path: o3.pathname + p2, method: i.method, headers: a[Symbol.for("nodejs.util.inspect.custom")](), insecureHTTPParser: i.insecureHTTPParser, agent: l };
+      const p2 = al(o3), h2 = { path: o3.pathname + p2, method: i.method, headers: a[/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")](), insecureHTTPParser: i.insecureHTTPParser, agent: l };
       return { parsedURL: o3, options: h2 };
     }, "getNodeRequestOptions");
     Hn = class Hn2 extends ft {
@@ -12329,7 +12624,7 @@ var MergedStream = class extends import_node_stream.PassThrough {
     __privateAdd(this, _ended, /* @__PURE__ */ new Set([]));
     __privateAdd(this, _aborted, /* @__PURE__ */ new Set([]));
     __privateAdd(this, _onFinished);
-    __privateAdd(this, _unpipeEvent, Symbol("unpipe"));
+    __privateAdd(this, _unpipeEvent, /* @__PURE__ */ Symbol("unpipe"));
     __privateAdd(this, _streamPromises, /* @__PURE__ */ new WeakMap());
   }
   add(stream) {
@@ -12534,9 +12829,9 @@ var PASSTHROUGH_LISTENERS_COUNT = 2;
 var PASSTHROUGH_LISTENERS_PER_STREAM = 1;
 
 // node_modules/globby/index.js
-var import_fast_glob2 = __toESM(require_out4(), 1);
+var import_fast_glob3 = __toESM(require_out4(), 1);
 
-// node_modules/unicorn-magic/node.js
+// node_modules/globby/node_modules/unicorn-magic/node.js
 var import_node_util = require("util");
 var import_node_child_process = require("child_process");
 var import_node_url = require("url");
@@ -12551,7 +12846,8 @@ var import_node_process = __toESM(require("process"), 1);
 var import_node_fs2 = __toESM(require("fs"), 1);
 var import_promises2 = __toESM(require("fs").promises, 1);
 var import_node_path3 = __toESM(require("path"), 1);
-var import_fast_glob = __toESM(require_out4(), 1);
+var import_node_os = __toESM(require("os"), 1);
+var import_fast_glob2 = __toESM(require_out4(), 1);
 var import_ignore = __toESM(require_ignore(), 1);
 
 // node_modules/is-path-inside/index.js
@@ -12576,7 +12872,52 @@ function slash(path5) {
 var import_node_fs = __toESM(require("fs"), 1);
 var import_node_path2 = __toESM(require("path"), 1);
 var import_node_util2 = require("util");
+var import_fast_glob = __toESM(require_out4(), 1);
 var isNegativePattern = (pattern) => pattern[0] === "!";
+var normalizeAbsolutePatternToRelative = (pattern) => {
+  if (!pattern.startsWith("/")) {
+    return pattern;
+  }
+  const inner = pattern.slice(1);
+  const firstSlashIndex = inner.indexOf("/");
+  const firstSegment = firstSlashIndex > 0 ? inner.slice(0, firstSlashIndex) : inner;
+  if (firstSlashIndex > 0 && !import_fast_glob.default.isDynamicPattern(firstSegment)) {
+    return pattern;
+  }
+  return inner;
+};
+var absolutePrefixesMatch = (positivePrefix, negativePrefix) => negativePrefix === positivePrefix;
+var getStaticAbsolutePathPrefix = (pattern) => {
+  if (!import_node_path2.default.isAbsolute(pattern)) {
+    return void 0;
+  }
+  const staticSegments = [];
+  for (const segment of pattern.split("/")) {
+    if (!segment) {
+      continue;
+    }
+    if (import_fast_glob.default.isDynamicPattern(segment)) {
+      break;
+    }
+    staticSegments.push(segment);
+  }
+  return staticSegments.length === 0 ? void 0 : `/${staticSegments.join("/")}`;
+};
+var normalizeNegativePattern = (pattern, positiveAbsolutePathPrefixes = [], hasRelativePositivePattern = false) => {
+  if (!pattern.startsWith("/")) {
+    return pattern;
+  }
+  const normalizedPattern = normalizeAbsolutePatternToRelative(pattern);
+  if (normalizedPattern !== pattern) {
+    return normalizedPattern;
+  }
+  if (hasRelativePositivePattern) {
+    return pattern.slice(1);
+  }
+  const negativeAbsolutePathPrefix = getStaticAbsolutePathPrefix(pattern);
+  const preserveAsAbsolutePattern = negativeAbsolutePathPrefix !== void 0 && positiveAbsolutePathPrefixes.some((positiveAbsolutePathPrefix) => absolutePrefixesMatch(positiveAbsolutePathPrefix, negativeAbsolutePathPrefix));
+  return preserveAsAbsolutePattern ? pattern : pattern.slice(1);
+};
 var bindFsMethod = (object, methodName) => {
   const method = object == null ? void 0 : object[methodName];
   return typeof method === "function" ? method.bind(object) : void 0;
@@ -12763,6 +13104,7 @@ var ignoreFilesGlobOptions = {
   dot: true
 };
 var GITIGNORE_FILES_PATTERN = "**/.gitignore";
+var MAX_INCLUDE_DEPTH = 10;
 var getReadFileMethod = (fsImplementation) => {
   var _a2, _b2;
   return (_b2 = (_a2 = bindFsMethod(fsImplementation == null ? void 0 : fsImplementation.promises, "readFile")) != null ? _a2 : bindFsMethod(import_promises2.default, "readFile")) != null ? _b2 : promisifyFsMethod(fsImplementation, "readFile");
@@ -12780,13 +13122,15 @@ var shouldSkipIgnoreFileError = (error, suppressErrors) => {
   }
   return Boolean(suppressErrors);
 };
-var createIgnoreFileReadError = (filePath, error) => {
+var createReadError = (kind, filePath, error) => {
+  const prefix = `Failed to read ${kind} at ${filePath}`;
   if (error instanceof Error) {
-    error.message = `Failed to read ignore file at ${filePath}: ${error.message}`;
-    return error;
+    return new Error(`${prefix}: ${error.message}`, { cause: error });
   }
-  return new Error(`Failed to read ignore file at ${filePath}: ${String(error)}`);
+  return new Error(`${prefix}: ${String(error)}`);
 };
+var createIgnoreFileReadError = (filePath, error) => createReadError("ignore file", filePath, error);
+var createGitConfigReadError = (filePath, error) => createReadError("git config", filePath, error);
 var processIgnoreFileCore = (filePath, readMethod, suppressErrors) => {
   try {
     const content = readMethod(filePath, "utf8");
@@ -12832,9 +13176,11 @@ var combineIgnoreFilePaths = (gitRoot, normalizedOptions, childPaths) => dedupeP
 var buildIgnoreResult = (files, normalizedOptions, gitRoot) => {
   const baseDir = gitRoot || normalizedOptions.cwd;
   const patterns = getPatternsFromIgnoreFiles(files, baseDir);
+  const matcher = createIgnoreMatcher(patterns, normalizedOptions.cwd, baseDir);
   return {
     patterns,
-    predicate: createIgnorePredicate(patterns, normalizedOptions.cwd, baseDir),
+    matcher,
+    predicate: (fileOrDirectory) => matcher(fileOrDirectory).ignored,
     usingGitRoot: Boolean(gitRoot && gitRoot !== normalizedOptions.cwd)
   };
 };
@@ -12876,21 +13222,29 @@ var toRelativePath = (fileOrDirectory, cwd) => {
   }
   return fileOrDirectory;
 };
-var createIgnorePredicate = (patterns, cwd, baseDir) => {
+var notIgnored = { ignored: false, unignored: false };
+var createIgnoreMatcher = (patterns, cwd, baseDir) => {
   const ignores = (0, import_ignore.default)().add(patterns);
   const resolvedCwd = import_node_path3.default.normalize(import_node_path3.default.resolve(cwd));
   const resolvedBaseDir = import_node_path3.default.normalize(import_node_path3.default.resolve(baseDir));
   return (fileOrDirectory) => {
     fileOrDirectory = toPath(fileOrDirectory);
+    const hasTrailingSeparator = /[/\\]$/.test(fileOrDirectory);
     const normalizedPath = import_node_path3.default.normalize(import_node_path3.default.resolve(fileOrDirectory));
     if (normalizedPath === resolvedCwd) {
-      return false;
+      return notIgnored;
     }
-    const relativePath = toRelativePath(fileOrDirectory, resolvedBaseDir);
+    let relativePath = toRelativePath(fileOrDirectory, resolvedBaseDir);
     if (relativePath === void 0) {
-      return false;
+      return notIgnored;
     }
-    return relativePath ? ignores.ignores(slash(relativePath)) : false;
+    if (!relativePath) {
+      return notIgnored;
+    }
+    if (hasTrailingSeparator && !relativePath.endsWith(import_node_path3.default.sep)) {
+      relativePath += import_node_path3.default.sep;
+    }
+    return ignores.test(slash(relativePath));
   };
 };
 var normalizeOptions = (options = {}) => {
@@ -12909,9 +13263,389 @@ var normalizeOptions = (options = {}) => {
     fs: options.fs
   };
 };
+var unescapeGitQuotedValue = (value) => value.replaceAll(/\\(["\\abfnrtv])/g, (_match, escapedCharacter) => {
+  switch (escapedCharacter) {
+    case "a": {
+      return "\x07";
+    }
+    case "b": {
+      return "\b";
+    }
+    case "f": {
+      return "\f";
+    }
+    case "n": {
+      return "\n";
+    }
+    case "r": {
+      return "\r";
+    }
+    case "t": {
+      return "	";
+    }
+    case "v": {
+      return "\v";
+    }
+    default: {
+      return escapedCharacter;
+    }
+  }
+});
+var parseGitConfigValue = (value) => {
+  const trimmedValue = value.trim();
+  const quotedMatch = trimmedValue.match(/^"((?:[^"\\]|\\.)*)"\s*(?:[#;].*)?$/);
+  if (quotedMatch) {
+    return unescapeGitQuotedValue(quotedMatch[1]);
+  }
+  return trimmedValue.replace(/\s[#;].*$/, "").trim();
+};
+var resolveConfigPath = (filePath, configPath) => {
+  if (configPath.startsWith("~/")) {
+    const homeDirectory = import_node_os.default.homedir();
+    const resolved = import_node_path3.default.join(homeDirectory, configPath.slice(2));
+    if (!isPathInside(resolved, homeDirectory)) {
+      return import_node_path3.default.join(homeDirectory, ".globby-invalid-path-traversal");
+    }
+    return resolved;
+  }
+  if (import_node_path3.default.isAbsolute(configPath)) {
+    return configPath;
+  }
+  return import_node_path3.default.resolve(import_node_path3.default.dirname(filePath), configPath);
+};
+var parseGitConfigSection = (line) => {
+  if (!line.startsWith("[")) {
+    return void 0;
+  }
+  let inQuotes = false;
+  let isEscaped = false;
+  for (let index = 1; index < line.length; index++) {
+    const character = line[index];
+    if (isEscaped) {
+      isEscaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      isEscaped = true;
+      continue;
+    }
+    if (character === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (character === "]" && !inQuotes) {
+      const remainder = line.slice(index + 1).trimStart();
+      if (remainder && !remainder.startsWith("#") && !remainder.startsWith(";")) {
+        return void 0;
+      }
+      return line.slice(1, index).trim();
+    }
+  }
+  return void 0;
+};
+var parseGitConfigEntry = (line) => {
+  const match = line.match(/^([A-Za-z\d-.]+)\s*=\s*(.*)$/);
+  if (!match) {
+    return void 0;
+  }
+  return {
+    key: match[1].toLowerCase(),
+    value: parseGitConfigValue(match[2])
+  };
+};
+var parseIncludeIfCondition = (section) => {
+  if (!section) {
+    return void 0;
+  }
+  const match = section.match(/^includeif\s+"([^"]+)"$/i);
+  return match ? match[1] : void 0;
+};
+var normalizeGitConfigConditionPattern = (pattern, configFilePath) => {
+  if (pattern.startsWith("~/")) {
+    pattern = import_node_path3.default.join(import_node_os.default.homedir(), pattern.slice(2));
+  } else if (pattern.startsWith("./")) {
+    pattern = import_node_path3.default.resolve(import_node_path3.default.dirname(configFilePath), pattern.slice(2));
+  } else if (!import_node_path3.default.isAbsolute(pattern)) {
+    pattern = `**/${pattern}`;
+  }
+  if (pattern.endsWith("/")) {
+    pattern += "**";
+  }
+  return slash(pattern);
+};
+var gitConfigGlobToRegex = (pattern, flags) => {
+  let regex = "";
+  for (let index = 0; index < pattern.length; index++) {
+    const character = pattern[index];
+    const nextCharacter = pattern[index + 1];
+    const nextNextCharacter = pattern[index + 2];
+    if (character === "*" && nextCharacter === "*" && nextNextCharacter === "/") {
+      regex += "(?:.*/)?";
+      index += 2;
+      continue;
+    }
+    if (character === "*" && nextCharacter === "*") {
+      regex += ".*";
+      index += 1;
+      continue;
+    }
+    if (character === "*") {
+      regex += "[^/]*";
+      continue;
+    }
+    if (character === "?") {
+      regex += "[^/]";
+      continue;
+    }
+    if (character === "[") {
+      const closingBracketIndex = pattern.indexOf("]", index + 1);
+      if (closingBracketIndex !== -1) {
+        const bracketContent = pattern.slice(index + 1, closingBracketIndex);
+        if (bracketContent) {
+          const negatedBracketContent = bracketContent[0] === "!" ? `^${bracketContent.slice(1)}` : bracketContent;
+          regex += `[${negatedBracketContent}]`;
+          index = closingBracketIndex;
+          continue;
+        }
+      }
+    }
+    regex += /[|\\{}()[\]^$+?.]/.test(character) ? `\\${character}` : character;
+  }
+  try {
+    return new RegExp(`^${regex}$`, flags);
+  } catch (e) {
+    return /(?!)/;
+  }
+};
+var matchesIncludeIfCondition = (condition, gitDirectory, configFilePath) => {
+  if (!gitDirectory) {
+    return false;
+  }
+  const match = condition.match(/^(gitdir|gitdir\/i):(.*)$/i);
+  if (!match) {
+    return false;
+  }
+  const [, keyword, rawPattern] = match;
+  const pattern = normalizeGitConfigConditionPattern(rawPattern.trim(), configFilePath);
+  const isCaseInsensitive = keyword.toLowerCase() === "gitdir/i";
+  const regularExpression = gitConfigGlobToRegex(pattern, isCaseInsensitive ? "i" : void 0);
+  const normalizedGitDirectory = slash(import_node_path3.default.resolve(gitDirectory));
+  return regularExpression.test(normalizedGitDirectory);
+};
+var shouldIncludeConfigSection = (section, gitDirectory, configFilePath) => {
+  if ((section == null ? void 0 : section.toLowerCase()) === "include") {
+    return true;
+  }
+  const condition = parseIncludeIfCondition(section);
+  return condition ? matchesIncludeIfCondition(condition, gitDirectory, configFilePath) : false;
+};
+var createExcludesFileValue = (value, declaringFilePath) => ({
+  value,
+  declaringFilePath
+});
+var parseGitConfigForExcludesFile = (content, normalizedPath, gitDirectory) => {
+  let currentSection;
+  let excludesFile;
+  const includePaths = [];
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(";")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      currentSection = parseGitConfigSection(trimmed);
+      continue;
+    }
+    const entry = parseGitConfigEntry(trimmed);
+    if (!entry) {
+      continue;
+    }
+    if ((currentSection == null ? void 0 : currentSection.toLowerCase()) === "core" && entry.key === "excludesfile") {
+      excludesFile = createExcludesFileValue(entry.value, normalizedPath);
+      continue;
+    }
+    if (shouldIncludeConfigSection(currentSection, gitDirectory, normalizedPath) && entry.key === "path" && entry.value) {
+      includePaths.push(resolveConfigPath(normalizedPath, entry.value));
+    }
+  }
+  return { excludesFile, includePaths };
+};
+var readGitConfigFile = (normalizedPath, readMethod, suppressErrors) => {
+  try {
+    return readMethod(normalizedPath, "utf8");
+  } catch (error) {
+    if (shouldSkipIgnoreFileError(error, suppressErrors)) {
+      return void 0;
+    }
+    throw createGitConfigReadError(normalizedPath, error);
+  }
+};
+var getExcludesFileFromGitConfigSync = (filePath, readFileSync, gitDirectory, options = {}) => {
+  const { suppressErrors, includeStack = /* @__PURE__ */ new Set(), depth = 0 } = options;
+  const normalizedPath = import_node_path3.default.resolve(filePath);
+  if (includeStack.has(normalizedPath)) {
+    return void 0;
+  }
+  if (depth >= MAX_INCLUDE_DEPTH) {
+    return void 0;
+  }
+  includeStack.add(normalizedPath);
+  const content = readGitConfigFile(normalizedPath, readFileSync, suppressErrors);
+  if (content === void 0) {
+    includeStack.delete(normalizedPath);
+    return void 0;
+  }
+  let { excludesFile, includePaths } = parseGitConfigForExcludesFile(content, normalizedPath, gitDirectory);
+  for (const includePath of includePaths) {
+    const includedExcludesFile = getExcludesFileFromGitConfigSync(includePath, readFileSync, gitDirectory, { suppressErrors, includeStack, depth: depth + 1 });
+    if (includedExcludesFile !== void 0) {
+      excludesFile = includedExcludesFile;
+    }
+  }
+  includeStack.delete(normalizedPath);
+  return excludesFile;
+};
+var getExcludesFileFromGitConfigAsync = (_0, _1, _2, ..._3) => __async(null, [_0, _1, _2, ..._3], function* (filePath, readFile, gitDirectory, options = {}) {
+  const { suppressErrors, includeStack = /* @__PURE__ */ new Set(), depth = 0 } = options;
+  const normalizedPath = import_node_path3.default.resolve(filePath);
+  if (includeStack.has(normalizedPath)) {
+    return void 0;
+  }
+  if (depth >= MAX_INCLUDE_DEPTH) {
+    return void 0;
+  }
+  includeStack.add(normalizedPath);
+  let content;
+  try {
+    content = yield readFile(normalizedPath, "utf8");
+  } catch (error) {
+    includeStack.delete(normalizedPath);
+    if (shouldSkipIgnoreFileError(error, suppressErrors)) {
+      return void 0;
+    }
+    throw createGitConfigReadError(normalizedPath, error);
+  }
+  let { excludesFile, includePaths } = parseGitConfigForExcludesFile(content, normalizedPath, gitDirectory);
+  for (const includePath of includePaths) {
+    const includedExcludesFile = yield getExcludesFileFromGitConfigAsync(includePath, readFile, gitDirectory, { suppressErrors, includeStack, depth: depth + 1 });
+    if (includedExcludesFile !== void 0) {
+      excludesFile = includedExcludesFile;
+    }
+  }
+  includeStack.delete(normalizedPath);
+  return excludesFile;
+});
+var resolveGitDirectoryFromFile = (gitFilePath, content) => {
+  const match = content.match(/^gitdir:\s*(.+?)\s*$/i);
+  if (!match) {
+    return gitFilePath;
+  }
+  return import_node_path3.default.resolve(import_node_path3.default.dirname(gitFilePath), match[1]);
+};
+var getGitDirectorySync = (gitRoot, readFileSync) => {
+  if (!gitRoot) {
+    return void 0;
+  }
+  const gitFilePath = import_node_path3.default.join(gitRoot, ".git");
+  try {
+    return resolveGitDirectoryFromFile(gitFilePath, readFileSync(gitFilePath, "utf8"));
+  } catch (e) {
+    return gitFilePath;
+  }
+};
+var getGitDirectoryAsync = (gitRoot, readFile) => __async(null, null, function* () {
+  if (!gitRoot) {
+    return void 0;
+  }
+  const gitFilePath = import_node_path3.default.join(gitRoot, ".git");
+  try {
+    return resolveGitDirectoryFromFile(gitFilePath, yield readFile(gitFilePath, "utf8"));
+  } catch (e) {
+    return gitFilePath;
+  }
+});
+var getXdgConfigHome = () => import_node_process.default.env.XDG_CONFIG_HOME || import_node_path3.default.join(import_node_os.default.homedir(), ".config");
+var getGitConfigPaths = () => {
+  if ("GIT_CONFIG_GLOBAL" in import_node_process.default.env) {
+    const value = import_node_process.default.env.GIT_CONFIG_GLOBAL;
+    return value ? [value] : [];
+  }
+  return [
+    import_node_path3.default.join(getXdgConfigHome(), "git", "config"),
+    import_node_path3.default.join(import_node_os.default.homedir(), ".gitconfig")
+  ];
+};
+var getDefaultGlobalGitignorePath = () => import_node_path3.default.join(getXdgConfigHome(), "git", "ignore");
+var resolveExcludesFilePath = (excludesFileConfig) => {
+  if ((excludesFileConfig == null ? void 0 : excludesFileConfig.value) === "") {
+    return void 0;
+  }
+  if (excludesFileConfig === void 0) {
+    return getDefaultGlobalGitignorePath();
+  }
+  return resolveConfigPath(excludesFileConfig.declaringFilePath, excludesFileConfig.value);
+};
+var readGlobalGitignoreContent = (filePath, readMethod, suppressErrors) => {
+  try {
+    const content = readMethod(filePath, "utf8");
+    return { filePath, content };
+  } catch (error) {
+    if (shouldSkipIgnoreFileError(error, suppressErrors)) {
+      return void 0;
+    }
+    throw createIgnoreFileReadError(filePath, error);
+  }
+};
+var getGlobalGitignoreFile = (options = {}) => {
+  var _a2;
+  const cwd = (_a2 = toPath(options.cwd)) != null ? _a2 : import_node_process.default.cwd();
+  const readFileSync = getReadFileSyncMethod(options.fs);
+  const gitRoot = findGitRootSync(cwd, options.fs);
+  const gitDirectory = getGitDirectorySync(gitRoot, readFileSync);
+  let excludesFileConfig;
+  for (const gitConfigPath of getGitConfigPaths()) {
+    const value = getExcludesFileFromGitConfigSync(gitConfigPath, readFileSync, gitDirectory, { suppressErrors: options.suppressErrors });
+    if (value !== void 0) {
+      excludesFileConfig = value;
+    }
+  }
+  const filePath = resolveExcludesFilePath(excludesFileConfig);
+  return filePath === void 0 ? void 0 : readGlobalGitignoreContent(filePath, readFileSync, options.suppressErrors);
+};
+var getGlobalGitignoreFileAsync = (..._0) => __async(null, [..._0], function* (options = {}) {
+  var _a2;
+  const cwd = (_a2 = toPath(options.cwd)) != null ? _a2 : import_node_process.default.cwd();
+  const readFile = getReadFileMethod(options.fs);
+  const gitRoot = yield findGitRoot(cwd, options.fs);
+  const gitDirectory = yield getGitDirectoryAsync(gitRoot, readFile);
+  const excludesFileValues = yield Promise.all(getGitConfigPaths().map((gitConfigPath) => getExcludesFileFromGitConfigAsync(
+    gitConfigPath,
+    readFile,
+    gitDirectory,
+    { suppressErrors: options.suppressErrors }
+  )));
+  const excludesFileConfig = excludesFileValues.findLast((value) => value !== void 0);
+  const filePath = resolveExcludesFilePath(excludesFileConfig);
+  if (filePath === void 0) {
+    return void 0;
+  }
+  try {
+    const content = yield readFile(filePath, "utf8");
+    return { filePath, content };
+  } catch (error) {
+    if (shouldSkipIgnoreFileError(error, options.suppressErrors)) {
+      return void 0;
+    }
+    throw createIgnoreFileReadError(filePath, error);
+  }
+});
+var buildGlobalMatcher = (globalIgnoreFile, cwd, rootDirectory = cwd) => {
+  const patterns = parseIgnoreFile(globalIgnoreFile, import_node_path3.default.dirname(globalIgnoreFile.filePath));
+  return createIgnoreMatcher(patterns, cwd, rootDirectory);
+};
 var collectIgnoreFileArtifactsAsync = (patterns, options, includeParentIgnoreFiles) => __async(null, null, function* () {
   const normalizedOptions = normalizeOptions(options);
-  const childPaths = yield globIgnoreFiles(import_fast_glob.default, patterns, normalizedOptions);
+  const childPaths = yield globIgnoreFiles(import_fast_glob2.default, patterns, normalizedOptions);
   const gitRoot = includeParentIgnoreFiles ? yield findGitRoot(normalizedOptions.cwd, normalizedOptions.fs) : void 0;
   const allPaths = combineIgnoreFilePaths(gitRoot, normalizedOptions, childPaths);
   const readFileMethod = getReadFileMethod(normalizedOptions.fs);
@@ -12920,7 +13654,7 @@ var collectIgnoreFileArtifactsAsync = (patterns, options, includeParentIgnoreFil
 });
 var collectIgnoreFileArtifactsSync = (patterns, options, includeParentIgnoreFiles) => {
   const normalizedOptions = normalizeOptions(options);
-  const childPaths = globIgnoreFiles(import_fast_glob.default.sync, patterns, normalizedOptions);
+  const childPaths = globIgnoreFiles(import_fast_glob2.default.sync, patterns, normalizedOptions);
   const gitRoot = includeParentIgnoreFiles ? findGitRootSync(normalizedOptions.cwd, normalizedOptions.fs) : void 0;
   const allPaths = combineIgnoreFilePaths(gitRoot, normalizedOptions, childPaths);
   const readFileSyncMethod = getReadFileSyncMethod(normalizedOptions.fs);
@@ -12962,8 +13696,11 @@ var assertPatternsInput = (patterns) => {
   }
 };
 var getStatMethod = (fsImplementation) => {
-  var _a2, _b2;
-  return (_b2 = (_a2 = bindFsMethod(fsImplementation == null ? void 0 : fsImplementation.promises, "stat")) != null ? _a2 : bindFsMethod(import_node_fs3.default.promises, "stat")) != null ? _b2 : promisifyFsMethod(fsImplementation, "stat");
+  var _a2;
+  if (fsImplementation) {
+    return (_a2 = bindFsMethod(fsImplementation.promises, "stat")) != null ? _a2 : promisifyFsMethod(fsImplementation, "stat");
+  }
+  return bindFsMethod(import_node_fs3.default.promises, "stat");
 };
 var getStatSyncMethod2 = (fsImplementation) => {
   var _a2;
@@ -13074,48 +13811,173 @@ var getIgnoreFilesPatterns = (options) => {
   }
   return patterns;
 };
-var applyIgnoreFilesAndGetFilter = (options) => __async(null, null, function* () {
-  const ignoreFilesPatterns = getIgnoreFilesPatterns(options);
-  if (ignoreFilesPatterns.length === 0) {
-    return {
-      options,
-      filter: createFilterFunction(false, options.cwd)
-    };
+var isPathIgnored = (matcher, globalMatcher, path5) => {
+  const globalResult = globalMatcher ? globalMatcher(path5) : void 0;
+  const result = matcher ? matcher(path5) : void 0;
+  if (result == null ? void 0 : result.unignored) {
+    return false;
   }
-  const includeParentIgnoreFiles = options.gitignore === true;
-  const { patterns, predicate, usingGitRoot } = yield getIgnorePatternsAndPredicate(ignoreFilesPatterns, options, includeParentIgnoreFiles);
-  const patternsForFastGlob = convertPatternsForFastGlob(patterns, usingGitRoot, normalizeDirectoryPatternForFastGlob);
-  const modifiedOptions = __spreadProps(__spreadValues({}, options), {
-    ignore: [...options.ignore, ...patternsForFastGlob]
-  });
-  return {
-    options: modifiedOptions,
-    filter: createFilterFunction(predicate, options.cwd)
-  };
-});
-var applyIgnoreFilesAndGetFilterSync = (options) => {
-  const ignoreFilesPatterns = getIgnoreFilesPatterns(options);
-  if (ignoreFilesPatterns.length === 0) {
-    return {
-      options,
-      filter: createFilterFunction(false, options.cwd)
-    };
+  return Boolean((result == null ? void 0 : result.ignored) || (globalResult == null ? void 0 : globalResult.ignored));
+};
+var hasIgnoredAncestorDirectory = (matcher, globalMatcher, file) => {
+  let currentPath = file;
+  while (true) {
+    const parentDirectory = import_node_path4.default.dirname(currentPath);
+    if (parentDirectory === currentPath) {
+      return false;
+    }
+    if (isPathIgnored(matcher, globalMatcher, `${parentDirectory}${import_node_path4.default.sep}`)) {
+      return true;
+    }
+    currentPath = parentDirectory;
   }
-  const includeParentIgnoreFiles = options.gitignore === true;
-  const { patterns, predicate, usingGitRoot } = getIgnorePatternsAndPredicateSync(ignoreFilesPatterns, options, includeParentIgnoreFiles);
-  const patternsForFastGlob = convertPatternsForFastGlob(patterns, usingGitRoot, normalizeDirectoryPatternForFastGlob);
-  const modifiedOptions = __spreadProps(__spreadValues({}, options), {
-    ignore: [...options.ignore, ...patternsForFastGlob]
-  });
-  return {
-    options: modifiedOptions,
-    filter: createFilterFunction(predicate, options.cwd)
+};
+var combinePredicate = (matcher, globalMatcher) => {
+  if (!matcher && !globalMatcher) {
+    return false;
+  }
+  return (file) => {
+    const result = matcher ? matcher(file) : void 0;
+    if (result == null ? void 0 : result.unignored) {
+      const globalResult = globalMatcher ? globalMatcher(file) : void 0;
+      return (globalResult == null ? void 0 : globalResult.ignored) && hasIgnoredAncestorDirectory(matcher, globalMatcher, file);
+    }
+    return isPathIgnored(matcher, globalMatcher, file);
   };
 };
-var createFilterFunction = (isIgnored, cwd) => {
-  const seen = /* @__PURE__ */ new Set();
+var buildIgnoreFilterResult = (options, cwd, { patterns, matcher, usingGitRoot }, globalMatcher, createFilter) => {
+  const finalPredicate = combinePredicate(matcher, globalMatcher);
+  const patternsForFastGlob = convertPatternsForFastGlob(patterns, usingGitRoot, normalizeDirectoryPatternForFastGlob);
+  return {
+    options: __spreadProps(__spreadValues({}, options), {
+      ignore: [...options.ignore, ...patternsForFastGlob]
+    }),
+    filter: createFilter(finalPredicate, cwd, options.fs)
+  };
+};
+var applyIgnoreFilesAndGetFilter = (options) => __async(null, null, function* () {
+  var _a2;
+  const cwd = (_a2 = options.cwd) != null ? _a2 : import_node_process2.default.cwd();
+  const ignoreFilesPatterns = getIgnoreFilesPatterns(options);
+  const globalIgnoreFile = options.globalGitignore ? yield getGlobalGitignoreFileAsync(options) : void 0;
+  if (ignoreFilesPatterns.length === 0 && !globalIgnoreFile) {
+    return {
+      options,
+      filter: createFilterFunctionAsync(false, cwd, options.fs)
+    };
+  }
+  const includeParentIgnoreFiles = options.gitignore === true;
+  const ignoreResult = ignoreFilesPatterns.length > 0 ? yield getIgnorePatternsAndPredicate(ignoreFilesPatterns, options, includeParentIgnoreFiles) : { patterns: [], matcher: false, usingGitRoot: false };
+  const globalGitRoot = globalIgnoreFile ? yield findGitRoot(cwd, options.fs) : void 0;
+  const globalMatcher = globalIgnoreFile ? buildGlobalMatcher(globalIgnoreFile, cwd, globalGitRoot != null ? globalGitRoot : cwd) : void 0;
+  return buildIgnoreFilterResult(options, cwd, ignoreResult, globalMatcher, createFilterFunctionAsync);
+});
+var applyIgnoreFilesAndGetFilterSync = (options) => {
+  var _a2;
+  const cwd = (_a2 = options.cwd) != null ? _a2 : import_node_process2.default.cwd();
+  const ignoreFilesPatterns = getIgnoreFilesPatterns(options);
+  const globalIgnoreFile = options.globalGitignore ? getGlobalGitignoreFile(options) : void 0;
+  if (ignoreFilesPatterns.length === 0 && !globalIgnoreFile) {
+    return {
+      options,
+      filter: createFilterFunction(false, cwd, options.fs)
+    };
+  }
+  const includeParentIgnoreFiles = options.gitignore === true;
+  const ignoreResult = ignoreFilesPatterns.length > 0 ? getIgnorePatternsAndPredicateSync(ignoreFilesPatterns, options, includeParentIgnoreFiles) : { patterns: [], matcher: false, usingGitRoot: false };
+  const globalGitRoot = globalIgnoreFile ? findGitRootSync(cwd, options.fs) : void 0;
+  const globalMatcher = globalIgnoreFile ? buildGlobalMatcher(globalIgnoreFile, cwd, globalGitRoot != null ? globalGitRoot : cwd) : void 0;
+  return buildIgnoreFilterResult(options, cwd, ignoreResult, globalMatcher, createFilterFunction);
+};
+var assertGlobalGitignoreSyncSupport = (options) => {
+  if (options.globalGitignore && options.fs && !options.fs.statSync) {
+    throw new Error("The `globalGitignore` option in `globbySync()` requires `fs.statSync` when a custom `fs` is provided.");
+  }
+};
+var globalGitignoreAsyncStatErrorMessage = "The `globalGitignore` option in `globby()` and `globbyStream()` requires `fs.promises.stat` or `fs.stat` when a custom `fs` is provided.";
+var assertGlobalGitignoreAsyncSupport = (options) => {
+  var _a2;
+  if (!options.globalGitignore || !options.fs) {
+    return;
+  }
+  if (!((_a2 = options.fs.promises) == null ? void 0 : _a2.stat) && !options.fs.stat) {
+    throw new Error(globalGitignoreAsyncStatErrorMessage);
+  }
+};
+var createPathResolver = (cwd) => {
   const basePath = cwd || import_node_process2.default.cwd();
   const pathCache = /* @__PURE__ */ new Map();
+  return (pathKey) => {
+    let absolutePath = pathCache.get(pathKey);
+    if (absolutePath === void 0) {
+      if (pathCache.size > 1e4) {
+        pathCache.clear();
+      }
+      absolutePath = import_node_path4.default.isAbsolute(pathKey) ? pathKey : import_node_path4.default.resolve(basePath, pathKey);
+      pathCache.set(pathKey, absolutePath);
+    }
+    return absolutePath;
+  };
+};
+var createAsyncDirectoryCheck = (fsMethod) => {
+  const directoryCache = /* @__PURE__ */ new Map();
+  return (absolutePath) => __async(null, null, function* () {
+    let isDirectory2 = directoryCache.get(absolutePath);
+    if (isDirectory2 !== void 0) {
+      return isDirectory2;
+    }
+    try {
+      const stats = yield fsMethod == null ? void 0 : fsMethod(absolutePath);
+      isDirectory2 = Boolean(stats == null ? void 0 : stats.isDirectory());
+    } catch (e) {
+      isDirectory2 = false;
+    }
+    if (directoryCache.size > 1e4) {
+      directoryCache.clear();
+    }
+    directoryCache.set(absolutePath, isDirectory2);
+    return isDirectory2;
+  });
+};
+var createDirectoryCheck = (fsMethod) => {
+  const directoryCache = /* @__PURE__ */ new Map();
+  return (absolutePath) => {
+    var _a2;
+    let isDirectory2 = directoryCache.get(absolutePath);
+    if (isDirectory2 !== void 0) {
+      return isDirectory2;
+    }
+    try {
+      isDirectory2 = Boolean((_a2 = fsMethod == null ? void 0 : fsMethod(absolutePath)) == null ? void 0 : _a2.isDirectory());
+    } catch (e) {
+      isDirectory2 = false;
+    }
+    if (directoryCache.size > 1e4) {
+      directoryCache.clear();
+    }
+    directoryCache.set(absolutePath, isDirectory2);
+    return isDirectory2;
+  };
+};
+var createFilterFunctionAsync = (isIgnored, cwd, fsImplementation) => {
+  const resolveAbsolutePath = createPathResolver(cwd);
+  const isDirectoryEntry = createAsyncDirectoryCheck(getStatMethod(fsImplementation));
+  return (fastGlobResult) => __async(null, null, function* () {
+    var _a2;
+    if (!isIgnored) {
+      return true;
+    }
+    const absolutePath = resolveAbsolutePath(import_node_path4.default.normalize((_a2 = fastGlobResult.path) != null ? _a2 : fastGlobResult));
+    if (isIgnored(absolutePath)) {
+      return false;
+    }
+    return !((yield isDirectoryEntry(absolutePath)) && isIgnored(`${absolutePath}${import_node_path4.default.sep}`));
+  });
+};
+var createFilterFunction = (isIgnored, cwd, fsImplementation) => {
+  const seen = /* @__PURE__ */ new Set();
+  const resolveAbsolutePath = createPathResolver(cwd);
+  const isDirectoryEntry = createDirectoryCheck(getStatSyncMethod2(fsImplementation));
   return (fastGlobResult) => {
     var _a2;
     const pathKey = import_node_path4.default.normalize((_a2 = fastGlobResult.path) != null ? _a2 : fastGlobResult);
@@ -13123,15 +13985,11 @@ var createFilterFunction = (isIgnored, cwd) => {
       return false;
     }
     if (isIgnored) {
-      let absolutePath = pathCache.get(pathKey);
-      if (absolutePath === void 0) {
-        absolutePath = import_node_path4.default.isAbsolute(pathKey) ? pathKey : import_node_path4.default.resolve(basePath, pathKey);
-        pathCache.set(pathKey, absolutePath);
-        if (pathCache.size > 1e4) {
-          pathCache.clear();
-        }
-      }
+      const absolutePath = resolveAbsolutePath(pathKey);
       if (isIgnored(absolutePath)) {
+        return false;
+      }
+      if (isDirectoryEntry(absolutePath) && isIgnored(`${absolutePath}${import_node_path4.default.sep}`)) {
         return false;
       }
     }
@@ -13140,10 +13998,47 @@ var createFilterFunction = (isIgnored, cwd) => {
   };
 };
 var unionFastGlobResults = (results, filter) => results.flat().filter((fastGlobResult) => filter(fastGlobResult));
+var unionFastGlobResultsAsync = (results, filter) => __async(null, null, function* () {
+  results = results.flat();
+  const matches = yield Promise.all(results.map((fastGlobResult) => filter(fastGlobResult)));
+  const seen = /* @__PURE__ */ new Set();
+  return results.filter((fastGlobResult, index) => {
+    var _a2;
+    if (!matches[index]) {
+      return false;
+    }
+    const pathKey = import_node_path4.default.normalize((_a2 = fastGlobResult.path) != null ? _a2 : fastGlobResult);
+    if (seen.has(pathKey)) {
+      return false;
+    }
+    seen.add(pathKey);
+    return true;
+  });
+});
 var convertNegativePatterns = (patterns, options) => {
   if (patterns.length > 0 && patterns.every((pattern) => isNegativePattern(pattern))) {
+    if (options.expandNegationOnlyPatterns === false) {
+      return [];
+    }
     patterns = ["**/*", ...patterns];
   }
+  const positiveAbsolutePathPrefixes = [];
+  let hasRelativePositivePattern = false;
+  const normalizedPatterns = [];
+  for (const pattern of patterns) {
+    if (isNegativePattern(pattern)) {
+      normalizedPatterns.push(`!${normalizeNegativePattern(pattern.slice(1), positiveAbsolutePathPrefixes, hasRelativePositivePattern)}`);
+      continue;
+    }
+    normalizedPatterns.push(pattern);
+    const staticAbsolutePathPrefix = getStaticAbsolutePathPrefix(pattern);
+    if (staticAbsolutePathPrefix === void 0) {
+      hasRelativePositivePattern = true;
+      continue;
+    }
+    positiveAbsolutePathPrefixes.push(staticAbsolutePathPrefix);
+  }
+  patterns = normalizedPatterns;
   const tasks = [];
   while (patterns.length > 0) {
     const index = patterns.findIndex((pattern) => isNegativePattern(pattern));
@@ -13217,31 +14112,58 @@ var generateTasksSync = (patterns, options) => {
   });
 };
 var globby = normalizeArguments((patterns, options) => __async(null, null, function* () {
+  assertGlobalGitignoreAsyncSupport(options);
   const { options: modifiedOptions, filter } = yield applyIgnoreFilesAndGetFilter(options);
   const tasks = yield generateTasks(patterns, modifiedOptions);
-  const results = yield Promise.all(tasks.map((task) => (0, import_fast_glob2.default)(task.patterns, task.options)));
-  return unionFastGlobResults(results, filter);
+  const results = yield Promise.all(tasks.map((task) => (0, import_fast_glob3.default)(task.patterns, task.options)));
+  return unionFastGlobResultsAsync(results, filter);
 }));
 var globbySync = normalizeArgumentsSync((patterns, options) => {
+  assertGlobalGitignoreSyncSupport(options);
   const { options: modifiedOptions, filter } = applyIgnoreFilesAndGetFilterSync(options);
   const tasks = generateTasksSync(patterns, modifiedOptions);
-  const results = tasks.map((task) => import_fast_glob2.default.sync(task.patterns, task.options));
+  const results = tasks.map((task) => import_fast_glob3.default.sync(task.patterns, task.options));
   return unionFastGlobResults(results, filter);
 });
 var globbyStream = normalizeArgumentsSync((patterns, options) => {
-  const { options: modifiedOptions, filter } = applyIgnoreFilesAndGetFilterSync(options);
-  const tasks = generateTasksSync(patterns, modifiedOptions);
-  const streams = tasks.map((task) => import_fast_glob2.default.stream(task.patterns, task.options));
-  if (streams.length === 0) {
-    return import_node_stream2.Readable.from([]);
-  }
-  const stream = mergeStreams(streams).filter((fastGlobResult) => filter(fastGlobResult));
+  assertGlobalGitignoreAsyncSupport(options);
+  const seen = /* @__PURE__ */ new Set();
+  const stream = import_node_stream2.Readable.from((function() {
+    return __asyncGenerator(this, null, function* () {
+      var _a2;
+      const { options: modifiedOptions, filter } = yield new __await(applyIgnoreFilesAndGetFilter(options));
+      const tasks = yield new __await(generateTasks(patterns, modifiedOptions));
+      if (tasks.length === 0) {
+        return;
+      }
+      const streams = tasks.map((task) => import_fast_glob3.default.stream(task.patterns, task.options));
+      try {
+        for (var iter = __forAwait(mergeStreams(streams)), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {
+          const fastGlobResult = temp.value;
+          const pathKey = import_node_path4.default.normalize((_a2 = fastGlobResult.path) != null ? _a2 : fastGlobResult);
+          if (!seen.has(pathKey) && (yield new __await(filter(fastGlobResult)))) {
+            seen.add(pathKey);
+            yield fastGlobResult;
+          }
+        }
+      } catch (temp) {
+        error = [temp];
+      } finally {
+        try {
+          more && (temp = iter.return) && (yield new __await(temp.call(iter)));
+        } finally {
+          if (error)
+            throw error[0];
+        }
+      }
+    });
+  })());
   return stream;
 });
-var isDynamicPattern = normalizeArgumentsSync((patterns, options) => patterns.some((pattern) => import_fast_glob2.default.isDynamicPattern(pattern, options)));
+var isDynamicPattern = normalizeArgumentsSync((patterns, options) => patterns.some((pattern) => import_fast_glob3.default.isDynamicPattern(pattern, options)));
 var generateGlobTasks = normalizeArguments(generateTasks);
 var generateGlobTasksSync = normalizeArgumentsSync(generateTasksSync);
-var { convertPathToPattern } = import_fast_glob2.default;
+var { convertPathToPattern } = import_fast_glob3.default;
 
 // node_modules/yaml/browser/index.js
 var browser_exports = {};
@@ -13313,13 +14235,13 @@ __export(dist_exports, {
 });
 
 // node_modules/yaml/browser/dist/nodes/identity.js
-var ALIAS = Symbol.for("yaml.alias");
-var DOC = Symbol.for("yaml.document");
-var MAP = Symbol.for("yaml.map");
-var PAIR = Symbol.for("yaml.pair");
-var SCALAR = Symbol.for("yaml.scalar");
-var SEQ = Symbol.for("yaml.seq");
-var NODE_TYPE = Symbol.for("yaml.node.type");
+var ALIAS = /* @__PURE__ */ Symbol.for("yaml.alias");
+var DOC = /* @__PURE__ */ Symbol.for("yaml.document");
+var MAP = /* @__PURE__ */ Symbol.for("yaml.map");
+var PAIR = /* @__PURE__ */ Symbol.for("yaml.pair");
+var SCALAR = /* @__PURE__ */ Symbol.for("yaml.scalar");
+var SEQ = /* @__PURE__ */ Symbol.for("yaml.seq");
+var NODE_TYPE = /* @__PURE__ */ Symbol.for("yaml.node.type");
 var isAlias = (node) => !!node && typeof node === "object" && node[NODE_TYPE] === ALIAS;
 var isDocument = (node) => !!node && typeof node === "object" && node[NODE_TYPE] === DOC;
 var isMap = (node) => !!node && typeof node === "object" && node[NODE_TYPE] === MAP;
@@ -13349,9 +14271,9 @@ function isNode(node) {
 var hasAnchor = (node) => (isScalar(node) || isCollection(node)) && !!node.anchor;
 
 // node_modules/yaml/browser/dist/visit.js
-var BREAK = Symbol("break visit");
-var SKIP = Symbol("skip children");
-var REMOVE = Symbol("remove node");
+var BREAK = /* @__PURE__ */ Symbol("break visit");
+var SKIP = /* @__PURE__ */ Symbol("skip children");
+var REMOVE = /* @__PURE__ */ Symbol("remove node");
 function visit(node, visitor) {
   const visitor_ = initVisitor(visitor);
   if (isDocument(node)) {
@@ -13840,6 +14762,8 @@ var Alias = class extends NodeBase {
    * instance of the `source` anchor before this node.
    */
   resolve(doc, ctx) {
+    if ((ctx == null ? void 0 : ctx.maxAliasCount) === 0)
+      throw new ReferenceError("Alias resolution is disabled");
     let nodes;
     if (ctx == null ? void 0 : ctx.aliasResolveCache) {
       nodes = ctx.aliasResolveCache;
@@ -14582,6 +15506,7 @@ function createStringifyContext(doc, options) {
     nullStr: "null",
     simpleKeys: false,
     singleQuote: null,
+    trailingComma: false,
     trueStr: "true",
     verifyAliasOrder: true
   }, doc.schema.toStringOptions, options);
@@ -14827,18 +15752,18 @@ var merge = {
 };
 var isMergeKey = (ctx, key) => (merge.identify(key) || isScalar(key) && (!key.type || key.type === Scalar.PLAIN) && merge.identify(key.value)) && (ctx == null ? void 0 : ctx.doc.schema.tags.some((tag) => tag.tag === merge.tag && tag.default));
 function addMergeToJSMap(ctx, map2, value) {
-  value = ctx && isAlias(value) ? value.resolve(ctx.doc) : value;
-  if (isSeq(value))
-    for (const it of value.items)
+  const source = resolveAliasValue(ctx, value);
+  if (isSeq(source))
+    for (const it of source.items)
       mergeValue(ctx, map2, it);
-  else if (Array.isArray(value))
-    for (const it of value)
+  else if (Array.isArray(source))
+    for (const it of source)
       mergeValue(ctx, map2, it);
   else
-    mergeValue(ctx, map2, value);
+    mergeValue(ctx, map2, source);
 }
 function mergeValue(ctx, map2, value) {
-  const source = ctx && isAlias(value) ? value.resolve(ctx.doc) : value;
+  const source = resolveAliasValue(ctx, value);
   if (!isMap(source))
     throw new Error("Merge sources must be maps or map aliases");
   const srcMap = source.toJSON(null, ctx, Map);
@@ -14858,6 +15783,9 @@ function mergeValue(ctx, map2, value) {
     }
   }
   return map2;
+}
+function resolveAliasValue(ctx, value) {
+  return ctx && isAlias(value) ? value.resolve(ctx.doc, ctx) : value;
 }
 
 // node_modules/yaml/browser/dist/nodes/addPairToJSMap.js
@@ -15040,12 +15968,19 @@ function stringifyFlowCollection({ items }, ctx, { flowChars, itemIndent }) {
     if (comment)
       reqNewline = true;
     let str = stringify(item, itemCtx, () => comment = null);
-    if (i < items.length - 1)
+    reqNewline || (reqNewline = lines.length > linesAtValue || str.includes("\n"));
+    if (i < items.length - 1) {
       str += ",";
+    } else if (ctx.options.trailingComma) {
+      if (ctx.options.lineWidth > 0) {
+        reqNewline || (reqNewline = lines.reduce((sum, line) => sum + line.length + 2, 2) + (str.length + 2) > ctx.options.lineWidth);
+      }
+      if (reqNewline) {
+        str += ",";
+      }
+    }
     if (comment)
       str += lineComment(str, itemIndent, commentString(comment));
-    if (!reqNewline && (lines.length > linesAtValue || str.includes("\n")))
-      reqNewline = true;
     lines.push(str);
     linesAtValue = lines.length;
   }
@@ -15391,7 +16326,7 @@ function stringifyNumber({ format, minFractionDigits, tag, value }) {
   if (!isFinite(num))
     return isNaN(num) ? ".nan" : num < 0 ? "-.inf" : ".inf";
   let n4 = Object.is(value, -0) ? "-0" : JSON.stringify(value);
-  if (!format && minFractionDigits && (!tag || tag === "tag:yaml.org,2002:float") && /^\d/.test(n4)) {
+  if (!format && minFractionDigits && (!tag || tag === "tag:yaml.org,2002:float") && /^-?\d/.test(n4) && !n4.includes("e")) {
     let i = n4.indexOf(".");
     if (i < 0) {
       i = n4.length;
@@ -17465,7 +18400,7 @@ function doubleQuotedValue(source, onError) {
         while (next === " " || next === "	")
           next = source[++i + 1];
       } else if (next === "x" || next === "u" || next === "U") {
-        const length = { x: 2, u: 4, U: 8 }[next];
+        const length = next === "x" ? 2 : next === "u" ? 4 : 8;
         res += parseCharCode(source, i + 1, length, onError);
         i += length;
       } else {
@@ -17540,12 +18475,13 @@ function parseCharCode(source, offset, length, onError) {
   const cc = source.substr(offset, length);
   const ok = cc.length === length && /^[0-9a-fA-F]+$/.test(cc);
   const code = ok ? parseInt(cc, 16) : NaN;
-  if (isNaN(code)) {
+  try {
+    return String.fromCodePoint(code);
+  } catch (e) {
     const raw = source.substr(offset - 2, length + 2);
     onError(offset - 2, "BAD_DQ_ESCAPE", `Invalid escape sequence ${raw}`);
     return raw;
   }
-  return String.fromCodePoint(code);
 }
 
 // node_modules/yaml/browser/dist/compose/compose-scalar.js
@@ -17675,17 +18611,22 @@ function composeNode(ctx, token, props, onError) {
     case "block-map":
     case "block-seq":
     case "flow-collection":
-      node = composeCollection(CN, ctx, token, props, onError);
-      if (anchor)
-        node.anchor = anchor.source.substring(1);
+      try {
+        node = composeCollection(CN, ctx, token, props, onError);
+        if (anchor)
+          node.anchor = anchor.source.substring(1);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        onError(token, "RESOURCE_EXHAUSTION", message);
+      }
       break;
     default: {
       const message = token.type === "error" ? token.message : `Unsupported token (type: ${token.type})`;
       onError(token, "UNEXPECTED_TOKEN", message);
-      node = composeEmptyNode(ctx, token.offset, void 0, null, props, onError);
       isSrcToken = false;
     }
   }
+  node != null ? node : node = composeEmptyNode(ctx, token.offset, void 0, null, props, onError);
   if (anchor && node.anchor === "")
     onError(anchor, "BAD_ALIAS", "Anchor cannot be an empty string");
   if (atKey && ctx.options.stringKeys && (!isScalar(node) || typeof node.value !== "string" || node.tag && node.tag !== "tag:yaml.org,2002:str")) {
@@ -17847,8 +18788,10 @@ ${cb}` : comment;
       }
     }
     if (afterDoc) {
-      Array.prototype.push.apply(doc.errors, this.errors);
-      Array.prototype.push.apply(doc.warnings, this.warnings);
+      for (let i = 0; i < this.errors.length; ++i)
+        doc.errors.push(this.errors[i]);
+      for (let i = 0; i < this.warnings.length; ++i)
+        doc.warnings.push(this.warnings[i]);
     } else {
       doc.errors = this.errors;
       doc.warnings = this.warnings;
@@ -18212,9 +19155,9 @@ function stringifyItem({ start, key, sep, value }) {
 }
 
 // node_modules/yaml/browser/dist/parse/cst-visit.js
-var BREAK2 = Symbol("break visit");
-var SKIP2 = Symbol("skip children");
-var REMOVE2 = Symbol("remove item");
+var BREAK2 = /* @__PURE__ */ Symbol("break visit");
+var SKIP2 = /* @__PURE__ */ Symbol("skip children");
+var REMOVE2 = /* @__PURE__ */ Symbol("remove item");
 function visit2(cst, visitor) {
   if ("type" in cst && cst.type === "document")
     cst = { start: cst.start, value: cst.value };
@@ -18547,7 +19490,7 @@ var Lexer = class {
       const n4 = (yield* __yieldStar(this.pushCount(1))) + (yield* __yieldStar(this.pushSpaces(true)));
       this.indentNext = this.indentValue + 1;
       this.indentValue += n4;
-      return yield* __yieldStar(this.parseBlockStart());
+      return "block-start";
     }
     return "doc";
   }
@@ -18846,28 +19789,38 @@ var Lexer = class {
     return 0;
   }
   *pushIndicators() {
-    switch (this.charAt(0)) {
-      case "!":
-        return (yield* __yieldStar(this.pushTag())) + (yield* __yieldStar(this.pushSpaces(true))) + (yield* __yieldStar(this.pushIndicators()));
-      case "&":
-        return (yield* __yieldStar(this.pushUntil(isNotAnchorChar))) + (yield* __yieldStar(this.pushSpaces(true))) + (yield* __yieldStar(this.pushIndicators()));
-      case "-":
-      // this is an error
-      case "?":
-      // this is an error outside flow collections
-      case ":": {
-        const inFlow = this.flowLevel > 0;
-        const ch1 = this.charAt(1);
-        if (isEmpty(ch1) || inFlow && flowIndicatorChars.has(ch1)) {
-          if (!inFlow)
-            this.indentNext = this.indentValue + 1;
-          else if (this.flowKey)
-            this.flowKey = false;
-          return (yield* __yieldStar(this.pushCount(1))) + (yield* __yieldStar(this.pushSpaces(true))) + (yield* __yieldStar(this.pushIndicators()));
+    let n4 = 0;
+    loop: while (true) {
+      switch (this.charAt(0)) {
+        case "!":
+          n4 += yield* __yieldStar(this.pushTag());
+          n4 += yield* __yieldStar(this.pushSpaces(true));
+          continue loop;
+        case "&":
+          n4 += yield* __yieldStar(this.pushUntil(isNotAnchorChar));
+          n4 += yield* __yieldStar(this.pushSpaces(true));
+          continue loop;
+        case "-":
+        // this is an error
+        case "?":
+        // this is an error outside flow collections
+        case ":": {
+          const inFlow = this.flowLevel > 0;
+          const ch1 = this.charAt(1);
+          if (isEmpty(ch1) || inFlow && flowIndicatorChars.has(ch1)) {
+            if (!inFlow)
+              this.indentNext = this.indentValue + 1;
+            else if (this.flowKey)
+              this.flowKey = false;
+            n4 += yield* __yieldStar(this.pushCount(1));
+            n4 += yield* __yieldStar(this.pushSpaces(true));
+            continue loop;
+          }
         }
       }
+      break loop;
     }
-    return 0;
+    return n4;
   }
   *pushTag() {
     if (this.charAt(1) === "<") {
@@ -19013,6 +19966,13 @@ function getFirstKeyStartProps(prev) {
   }
   return prev.splice(i, prev.length);
 }
+function arrayPushArray(target, source) {
+  if (source.length < 1e5)
+    Array.prototype.push.apply(target, source);
+  else
+    for (let i = 0; i < source.length; ++i)
+      target.push(source[i]);
+}
 function fixFlowSeqItems(fc) {
   if (fc.start.type === "flow-seq-start") {
     for (const it of fc.items) {
@@ -19022,11 +19982,11 @@ function fixFlowSeqItems(fc) {
         delete it.key;
         if (isFlowToken(it.value)) {
           if (it.value.end)
-            Array.prototype.push.apply(it.value.end, it.sep);
+            arrayPushArray(it.value.end, it.sep);
           else
             it.value.end = it.sep;
         } else
-          Array.prototype.push.apply(it.start, it.sep);
+          arrayPushArray(it.start, it.sep);
         delete it.sep;
       }
     }
@@ -19380,7 +20340,7 @@ var Parser = class {
             const prev = map2.items[map2.items.length - 2];
             const end = (_a2 = prev == null ? void 0 : prev.value) == null ? void 0 : _a2.end;
             if (Array.isArray(end)) {
-              Array.prototype.push.apply(end, it.start);
+              arrayPushArray(end, it.start);
               end.push(this.sourceToken);
               map2.items.pop();
               return;
@@ -19569,7 +20529,7 @@ var Parser = class {
             const prev = seq2.items[seq2.items.length - 2];
             const end = (_a2 = prev == null ? void 0 : prev.value) == null ? void 0 : _a2.end;
             if (Array.isArray(end)) {
-              Array.prototype.push.apply(end, it.start);
+              arrayPushArray(end, it.start);
               end.push(this.sourceToken);
               seq2.items.pop();
               return;
@@ -19891,307 +20851,219 @@ function stringify3(value, replacer, options) {
 // node_modules/yaml/browser/index.js
 var browser_default = dist_exports;
 
-// node_modules/maml.js/build/index.js
+// node_modules/maml/build/index.js
 var build_exports = {};
 __export(build_exports, {
   parse: () => parse2,
   stringify: () => stringify4
 });
-
-// node_modules/maml.js/build/parse.js
 function parse2(source) {
-  if (typeof source !== "string")
-    throw TypeError("Source must be a string");
+  if (typeof source != "string") throw TypeError("Source must be a string");
   let pos = 0, lineNumber = 1, ch, done = false;
   next();
-  const value = parseValue();
-  skipWhitespace();
-  if (!done) {
+  let value = parseValue();
+  if (skipWhitespace(), !done)
     throw new SyntaxError(errorSnippet());
-  }
-  expectValue(value);
-  return value;
+  return expectValue(value), value;
   function next() {
-    if (pos < source.length) {
-      ch = source[pos];
-      pos++;
-    } else {
-      ch = "";
-      done = true;
-    }
-    if (ch === "\n") {
-      lineNumber++;
-    }
+    pos < source.length ? (ch = source[pos], pos++) : (ch = "", done = true), ch === `
+` && lineNumber++;
   }
-  function lookahead2() {
-    return source.substring(pos, pos + 2);
+  function lookahead(n4) {
+    return source.substring(pos, pos + n4);
   }
   function parseValue() {
     var _a2, _b2, _c, _d, _e, _f, _g;
-    skipWhitespace();
-    return (_g = (_f = (_e = (_d = (_c = (_b2 = (_a2 = parseMultilineString()) != null ? _a2 : parseString()) != null ? _b2 : parseNumber()) != null ? _c : parseObject()) != null ? _d : parseArray()) != null ? _e : parseKeyword("true", true)) != null ? _f : parseKeyword("false", false)) != null ? _g : parseKeyword("null", null);
+    return skipWhitespace(), (_g = (_f = (_e = (_d = (_c = (_b2 = (_a2 = parseRawString()) != null ? _a2 : parseString()) != null ? _b2 : parseNumber()) != null ? _c : parseObject()) != null ? _d : parseArray()) != null ? _e : parseKeyword("true", true)) != null ? _f : parseKeyword("false", false)) != null ? _g : parseKeyword("null", null);
   }
   function parseString() {
-    if (ch !== '"')
-      return;
-    let str = "";
-    let escaped = false;
-    while (true) {
-      next();
-      if (escaped) {
+    if (ch !== '"') return;
+    let str = "", escaped = false;
+    for (; ; )
+      if (next(), escaped) {
         if (ch === "u") {
-          next();
-          if (ch !== "{") {
-            throw new SyntaxError(errorSnippet(errorMap.u + " " + JSON.stringify(ch) + ' (expected "{")'));
-          }
+          if (next(), ch !== "{")
+            throw new SyntaxError(
+              errorSnippet(
+                errorMap.u + " " + JSON.stringify(ch) + ' (expected "{")'
+              )
+            );
           let hex = "";
-          while (true) {
-            next();
-            if (ch === "}")
-              break;
-            if (!isHexDigit(ch)) {
-              throw new SyntaxError(errorSnippet(errorMap.u + " " + JSON.stringify(ch)));
-            }
-            hex += ch;
-            if (hex.length > 6) {
-              throw new SyntaxError(errorSnippet(errorMap.u + " (too many hex digits)"));
-            }
+          for (; next(), ch !== "}"; ) {
+            if (!isHexDigit(ch))
+              throw new SyntaxError(
+                errorSnippet(errorMap.u + " " + JSON.stringify(ch))
+              );
+            if (hex += ch, hex.length > 6)
+              throw new SyntaxError(
+                errorSnippet(errorMap.u + " (too many hex digits)")
+              );
           }
-          if (hex.length === 0) {
+          if (hex.length === 0)
             throw new SyntaxError(errorSnippet(errorMap.u));
-          }
-          const codePoint = parseInt(hex, 16);
-          if (codePoint > 1114111) {
+          let codePoint = parseInt(hex, 16);
+          if (codePoint > 1114111 || codePoint >= 55296 && codePoint <= 57343)
             throw new SyntaxError(errorSnippet(errorMap.u + " (out of range)"));
-          }
           str += String.fromCodePoint(codePoint);
         } else {
-          const escapedChar = escapeMap[ch];
-          if (!escapedChar) {
-            throw new SyntaxError(errorSnippet(errorMap.u + " " + JSON.stringify(ch)));
-          }
+          let escapedChar = escapeMap[ch];
+          if (!escapedChar)
+            throw new SyntaxError(
+              errorSnippet(errorMap.u + " " + JSON.stringify(ch))
+            );
           str += escapedChar;
         }
         escaped = false;
-      } else if (ch === "\\") {
+      } else if (ch === "\\")
         escaped = true;
-      } else if (ch === '"') {
-        break;
-      } else if (ch === "\n") {
-        throw new SyntaxError(errorSnippet(`Use """ for multiline strings or escape newlines with "\\n"`));
-      } else if (ch < "") {
-        throw new SyntaxError(errorSnippet(`Unescaped control character ${JSON.stringify(ch)}`));
-      } else {
+      else {
+        if (ch === '"')
+          break;
+        if (ch === `
+`)
+          throw new SyntaxError(errorSnippet());
+        if (ch < " " && ch !== "	" || ch === "\x7F")
+          throw new SyntaxError(errorSnippet());
         str += ch;
       }
-    }
-    next();
-    return str;
+    return next(), str;
   }
-  function parseMultilineString() {
-    if (ch !== '"' || lookahead2() !== '""')
-      return;
-    next();
-    next();
-    next();
+  function parseRawString() {
+    if (ch !== '"' || lookahead(2) !== '""') return;
+    next(), next(), next();
     let hasLeadingNewline = false;
-    if (ch === "\n") {
-      hasLeadingNewline = true;
-      next();
-    }
+    ch === "\r" && lookahead(1) === `
+` && next(), ch === `
+` && (hasLeadingNewline = true, next());
     let str = "";
-    while (!done) {
-      if (ch === '"' && lookahead2() === '""') {
-        next();
-        next();
-        next();
-        if (str === "" && !hasLeadingNewline) {
-          throw new SyntaxError(errorSnippet("Multiline strings cannot be empty"));
-        }
+    for (; !done; ) {
+      if (ch === '"' && lookahead(2) === '""') {
+        if (next(), next(), next(), str === "" && !hasLeadingNewline)
+          throw new SyntaxError(errorSnippet("Raw strings cannot be empty"));
         return str;
       }
-      str += ch;
-      next();
+      str += ch, next();
     }
     throw new SyntaxError(errorSnippet());
   }
   function parseNumber() {
-    if (!isDigit(ch) && ch !== "-")
-      return;
-    let numStr = "";
-    let float3 = false;
-    if (ch === "-") {
-      numStr += ch;
-      next();
-      if (!isDigit(ch)) {
-        throw new SyntaxError(errorSnippet());
-      }
-    }
-    if (ch === "0") {
-      numStr += ch;
-      next();
-    } else {
-      while (isDigit(ch)) {
-        numStr += ch;
-        next();
-      }
-    }
+    if (!isDigit(ch) && ch !== "-") return;
+    let numStr = "", float3 = false;
+    if (ch === "-" && (numStr += ch, next(), !isDigit(ch)))
+      throw new SyntaxError(errorSnippet());
+    if (ch === "0")
+      numStr += ch, next();
+    else
+      for (; isDigit(ch); )
+        numStr += ch, next();
     if (ch === ".") {
-      float3 = true;
-      numStr += ch;
-      next();
-      if (!isDigit(ch)) {
+      if (float3 = true, numStr += ch, next(), !isDigit(ch))
         throw new SyntaxError(errorSnippet());
-      }
-      while (isDigit(ch)) {
-        numStr += ch;
-        next();
-      }
+      for (; isDigit(ch); )
+        numStr += ch, next();
     }
     if (ch === "e" || ch === "E") {
-      float3 = true;
-      numStr += ch;
-      next();
-      if (ch === "+" || ch === "-") {
-        numStr += ch;
-        next();
-      }
-      if (!isDigit(ch)) {
+      if (float3 = true, numStr += ch, next(), (ch === "+" || ch === "-") && (numStr += ch, next()), !isDigit(ch))
         throw new SyntaxError(errorSnippet());
-      }
-      while (isDigit(ch)) {
-        numStr += ch;
-        next();
-      }
+      for (; isDigit(ch); )
+        numStr += ch, next();
     }
     return float3 ? parseFloat(numStr) : toSafeNumber(numStr);
   }
   function parseObject() {
-    if (ch !== "{")
-      return;
-    next();
-    skipWhitespace();
-    const obj = {};
-    if (ch === "}") {
-      next();
-      return obj;
-    }
-    while (true) {
-      const keyPos = pos;
-      let key;
-      if (ch === '"') {
-        key = parseString();
-      } else {
-        key = parseKey();
-      }
-      if (Object.prototype.hasOwnProperty.call(obj, key)) {
-        pos = keyPos;
-        throw new SyntaxError(errorSnippet(`Duplicate key ${JSON.stringify(key)}`));
-      }
-      skipWhitespace();
-      if (ch !== ":") {
+    if (ch !== "{") return;
+    next(), skipWhitespace();
+    let obj = {};
+    if (ch === "}")
+      return next(), obj;
+    for (; ; ) {
+      let keyPos = pos, key;
+      if (ch === '"' ? key = parseString() : key = parseKey(), Object.prototype.hasOwnProperty.call(obj, key))
+        throw pos = keyPos, new SyntaxError(
+          errorSnippet(`Duplicate key ${JSON.stringify(key)}`)
+        );
+      if (skipWhitespace(), ch !== ":")
         throw new SyntaxError(errorSnippet());
-      }
       next();
-      const value2 = parseValue();
-      expectValue(value2);
-      obj[key] = value2;
-      const newlineAfterValue = skipWhitespace();
-      if (ch === "}") {
-        next();
-        return obj;
-      } else if (ch === ",") {
-        next();
-        skipWhitespace();
-        if (ch === "}") {
-          next();
-          return obj;
-        }
-      } else if (newlineAfterValue) {
-        continue;
+      let value2 = parseValue();
+      expectValue(value2), obj[key] = value2;
+      let newlineAfterValue = skipWhitespace();
+      if (ch === "}")
+        return next(), obj;
+      if (ch === ",") {
+        if (next(), skipWhitespace(), ch === "}")
+          return next(), obj;
       } else {
-        throw new SyntaxError(errorSnippet("Expected comma or newline between key-value pairs"));
+        if (newlineAfterValue)
+          continue;
+        throw new SyntaxError(
+          errorSnippet("Expected comma or newline between key-value pairs")
+        );
       }
     }
   }
   function parseKey() {
     let identifier = "";
-    while (isKeyChar(ch)) {
-      identifier += ch;
-      next();
-    }
-    if (identifier === "") {
+    for (; isKeyChar(ch); )
+      identifier += ch, next();
+    if (identifier === "")
       throw new SyntaxError(errorSnippet());
-    }
     return identifier;
   }
   function parseArray() {
-    if (ch !== "[")
-      return;
-    next();
-    skipWhitespace();
-    const array = [];
-    if (ch === "]") {
-      next();
-      return array;
-    }
-    while (true) {
-      const value2 = parseValue();
-      expectValue(value2);
-      array.push(value2);
-      const newLineAfterValue = skipWhitespace();
-      if (ch === "]") {
-        next();
-        return array;
-      } else if (ch === ",") {
-        next();
-        skipWhitespace();
-        if (ch === "]") {
-          next();
-          return array;
-        }
-      } else if (newLineAfterValue) {
-        continue;
+    if (ch !== "[") return;
+    next(), skipWhitespace();
+    let array = [];
+    if (ch === "]")
+      return next(), array;
+    for (; ; ) {
+      let value2 = parseValue();
+      expectValue(value2), array.push(value2);
+      let newLineAfterValue = skipWhitespace();
+      if (ch === "]")
+        return next(), array;
+      if (ch === ",") {
+        if (next(), skipWhitespace(), ch === "]")
+          return next(), array;
       } else {
-        throw new SyntaxError(errorSnippet("Expected comma or newline between values"));
+        if (newLineAfterValue)
+          continue;
+        throw new SyntaxError(
+          errorSnippet("Expected comma or newline between values")
+        );
       }
     }
   }
   function parseKeyword(name, value2) {
-    if (ch !== name[0])
-      return;
-    for (let i = 1; i < name.length; i++) {
-      next();
-      if (ch !== name[i]) {
-        throw new SyntaxError(errorSnippet());
-      }
+    if (ch === name[0]) {
+      for (let i = 1; i < name.length; i++)
+        if (next(), ch !== name[i])
+          throw new SyntaxError(errorSnippet());
+      if (next(), isWhitespace(ch) || ch === "," || ch === "}" || ch === "]" || done)
+        return value2;
+      throw new SyntaxError(errorSnippet());
     }
-    next();
-    if (isWhitespace(ch) || ch === "," || ch === "}" || ch === "]" || ch === void 0) {
-      return value2;
-    }
-    throw new SyntaxError(errorSnippet());
   }
   function skipWhitespace() {
     let hasNewline = false;
-    while (isWhitespace(ch)) {
-      hasNewline || (hasNewline = ch === "\n");
-      next();
-    }
-    const hasNewlineAfterComment = skipComment();
+    for (; isWhitespace(ch); )
+      hasNewline || (hasNewline = ch === `
+`), next();
+    let hasNewlineAfterComment = skipComment();
     return hasNewline || hasNewlineAfterComment;
   }
   function skipComment() {
     if (ch === "#") {
-      while (!done && ch !== "\n") {
+      for (; !done && ch !== `
+`; )
         next();
-      }
       return skipWhitespace();
     }
     return false;
   }
   function isWhitespace(ch2) {
-    return ch2 === " " || ch2 === "\n" || ch2 === "	" || ch2 === "\r";
+    return ch2 === " " || ch2 === `
+` || ch2 === "	" || ch2 === "\r";
   }
   function isHexDigit(ch2) {
     return ch2 >= "0" && ch2 <= "9" || ch2 >= "A" && ch2 <= "F";
@@ -20203,31 +21075,29 @@ function parse2(source) {
     return ch2 >= "A" && ch2 <= "Z" || ch2 >= "a" && ch2 <= "z" || ch2 >= "0" && ch2 <= "9" || ch2 === "_" || ch2 === "-";
   }
   function toSafeNumber(str) {
-    if (str == "-0")
-      return -0;
-    const num = Number(str);
-    return num >= Number.MIN_SAFE_INTEGER && num <= Number.MAX_SAFE_INTEGER ? num : BigInt(str);
+    if (str == "-0") return -0;
+    let num = Number(str);
+    if (num >= Number.MIN_SAFE_INTEGER && num <= Number.MAX_SAFE_INTEGER)
+      return num;
+    let big = BigInt(str), I64_MIN = -__pow(/* @__PURE__ */ BigInt("2"), /* @__PURE__ */ BigInt("63")), I64_MAX = __pow(/* @__PURE__ */ BigInt("2"), /* @__PURE__ */ BigInt("63")) - /* @__PURE__ */ BigInt("1");
+    if (big < I64_MIN || big > I64_MAX)
+      throw new SyntaxError(
+        `Integer ${str} is outside the 64-bit signed integer range on line ${lineNumber}.`
+      );
+    return big;
   }
   function expectValue(value2) {
-    if (value2 === void 0) {
+    if (value2 === void 0)
       throw new SyntaxError(errorSnippet());
-    }
   }
   function errorSnippet(message = `Unexpected character ${JSON.stringify(ch)}`) {
-    if (!ch)
-      message = "Unexpected end of input";
-    const lines = source.substring(pos - 40, pos).split("\n");
-    let lastLine = lines.at(-1) || "";
-    let postfix = source.substring(pos, pos + 40).split("\n", 1).at(0) || "";
-    if (lastLine === "") {
-      lastLine = lines.at(-2) || "";
-      lastLine += " ";
-      lineNumber--;
-      postfix = "";
-    }
-    const snippet = `    ${lastLine}${postfix}
-`;
-    const pointer = `    ${".".repeat(Math.max(0, lastLine.length - 1))}^
+    ch || (message = "Unexpected end of input");
+    let lines = source.substring(pos - 40, pos).split(`
+`), lastLine = lines.at(-1) || "", postfix = source.substring(pos, pos + 40).split(`
+`, 1).at(0) || "";
+    lastLine === "" && (lastLine = lines.at(-2) || "", lastLine += " ", lineNumber--, postfix = "");
+    let snippet = `    ${lastLine}${postfix}
+`, pointer = `    ${".".repeat(Math.max(0, lastLine.length - 1))}^
 `;
     return `${message} on line ${lineNumber}.
 
@@ -20237,67 +21107,86 @@ ${snippet}${pointer}`;
 var escapeMap = {
   '"': '"',
   "\\": "\\",
-  n: "\n",
+  n: `
+`,
   r: "\r",
   t: "	"
 };
 var errorMap = {
   u: "Invalid escape sequence"
 };
-
-// node_modules/maml.js/build/stringify.js
 function stringify4(value) {
   return doStringify(value, 0);
 }
 function doStringify(value, level) {
-  const kind = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+  let kind = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
   switch (kind) {
     case "string":
-      return JSON.stringify(value);
+      return quoteString(value);
     case "boolean":
-    case "bigint":
-    case "number":
       return `${value}`;
+    case "bigint": {
+      let I64_MIN = -__pow(/* @__PURE__ */ BigInt("2"), /* @__PURE__ */ BigInt("63")), I64_MAX = __pow(/* @__PURE__ */ BigInt("2"), /* @__PURE__ */ BigInt("63")) - /* @__PURE__ */ BigInt("1");
+      if (value < I64_MIN || value > I64_MAX)
+        throw new Error(
+          `Integer ${value} is outside the 64-bit signed integer range`
+        );
+      return `${value}`;
+    }
+    case "number": {
+      if (!Number.isFinite(value))
+        throw new Error(`Cannot encode ${value} as a MAML value`);
+      let str = `${value}`;
+      if (!str.includes(".") && !str.includes("e") && !Number.isSafeInteger(value))
+        throw new Error(
+          `Integer ${value} cannot be represented losslessly as a number, use BigInt instead`
+        );
+      return str;
+    }
     case "null":
     case "undefined":
       return "null";
     case "array": {
-      const len = value.length;
-      if (len === 0)
-        return "[]";
-      const childIndent = getIndent(level + 1);
-      const parentIndent = getIndent(level);
-      let out = "[\n";
-      for (let i = 0; i < len; i++) {
-        if (i > 0)
-          out += "\n";
-        out += childIndent + doStringify(value[i], level + 1);
-      }
-      return out + "\n" + parentIndent + "]";
+      let len = value.length;
+      if (len === 0) return "[]";
+      let childIndent = getIndent(level + 1), parentIndent = getIndent(level), out = `[
+`;
+      for (let i = 0; i < len; i++)
+        i > 0 && (out += `
+`), out += childIndent + doStringify(value[i], level + 1);
+      return out + `
+` + parentIndent + "]";
     }
     case "object": {
-      const keys = Object.keys(value);
-      const len = keys.length;
-      if (len === 0)
-        return "{}";
-      const childIndent = getIndent(level + 1);
-      const parentIndent = getIndent(level);
-      let out = "{\n";
+      let keys = Object.keys(value), len = keys.length;
+      if (len === 0) return "{}";
+      let childIndent = getIndent(level + 1), parentIndent = getIndent(level), out = `{
+`;
       for (let i = 0; i < len; i++) {
-        if (i > 0)
-          out += "\n";
-        const key = keys[i];
+        i > 0 && (out += `
+`);
+        let key = keys[i];
         out += childIndent + doKeyStringify(key) + ": " + doStringify(value[key], level + 1);
       }
-      return out + "\n" + parentIndent + "}";
+      return out + `
+` + parentIndent + "}";
     }
     default:
       throw new Error(`Unsupported value type: ${kind}`);
   }
 }
+function quoteString(s) {
+  let out = '"';
+  for (let c2 of s) {
+    let code = c2.codePointAt(0);
+    c2 === '"' ? out += '\\"' : c2 === "\\" ? out += "\\\\" : c2 === `
+` ? out += "\\n" : c2 === "\r" ? out += "\\r" : c2 === "	" ? out += "\\t" : code < 32 || code === 127 ? out += `\\u{${code.toString(16).toUpperCase()}}` : out += c2;
+  }
+  return out + '"';
+}
 var KEY_RE = /^[A-Za-z0-9_-]+$/;
 function doKeyStringify(key) {
-  return KEY_RE.test(key) ? key : JSON.stringify(key);
+  return KEY_RE.test(key) ? key : quoteString(key);
 }
 function getIndent(level) {
   return " ".repeat(2 * level);

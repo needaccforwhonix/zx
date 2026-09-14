@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { type AsyncHook, AsyncLocalStorage, createHook } from 'node:async_hooks'
-import { Buffer } from 'node:buffer'
+import { type BlobPart, Buffer } from 'node:buffer'
 import cp, {
   type ChildProcess,
   type IOType,
@@ -191,24 +191,36 @@ export interface Shell<
 // The zx
 export type $ = Shell & Options
 
-export const $: $ = new Proxy<$>(
-  // prettier-ignore
+export const $: $ = sync$(
   function (pieces: TemplateStringsArray | Partial<Options>, ...args: any[]) {
     const opts = getStore()
-    if (!Array.isArray(pieces)) {
-      return function (this: any, ...args: any) {
-        return within(() => Object.assign($, opts, pieces).apply(this, args))
-      }
-    }
-    const from = Fail.getCallerLocation()
-    const cb: PromiseCallback = () => (cb[SHOT] = getSnapshot(opts, from, pieces as TemplateStringsArray, args))
-    const pp = new ProcessPromise(cb)
 
+    if (!Array.isArray(pieces))
+      return sync$(
+        function (this: any, ...args: any) {
+          return within(() => Object.assign($, opts, pieces).apply(this, args))
+        } as $,
+        () => $({ ...pieces, sync: true })
+      )
+
+    const from = Fail.getCallerLocation()
+    const cb: PromiseCallback = () =>
+      (cb[SHOT] = getSnapshot(opts, from, pieces as TemplateStringsArray, args))
+
+    const pp = new ProcessPromise(cb)
     if (!pp.isHalted()) pp.run()
 
     return pp.sync ? pp.output : pp
   } as $,
-  {
+  () => $({ sync: true })
+)
+
+function sync$(fn: $, makeSync: () => $): $ {
+  return new Proxy(fn, {
+    get(t, key) {
+      if (key === 'sync') return makeSync()
+      return Reflect.get(key in Function.prototype ? t : getStore(), key)
+    },
     set(t, key, value) {
       return Reflect.set(
         key in Function.prototype ? t : getStore(),
@@ -216,13 +228,8 @@ export const $: $ = new Proxy<$>(
         value
       )
     },
-    get(t, key) {
-      return key === 'sync'
-        ? $({ sync: true })
-        : Reflect.get(key in Function.prototype ? t : getStore(), key)
-    },
-  }
-)
+  })
+}
 
 type ProcessStage = 'initial' | 'halted' | 'running' | 'fulfilled' | 'rejected'
 
@@ -295,6 +302,9 @@ export class ProcessPromise extends Promise<ProcessOutput> {
       $.pieces as TemplateStringsArray,
       $.args
     ) as string
+
+    if ($[SYNC] && !isString($.cmd))
+      throw new Fail('sync mode does not allow async command resolution')
   }
   run(): this {
     ProcessPromise.bus.runBack(this)
@@ -303,8 +313,16 @@ export class ProcessPromise extends Promise<ProcessOutput> {
 
     const self = this
     const $ = self._snapshot
-    const id = self.id
-    const cwd = $.cwd || $[CWD]
+    const { id, cwd } = self
+
+    if (!fs.existsSync(cwd)) {
+      this.finalize(
+        ProcessOutput.fromError(
+          new Error(`The working directory '${cwd}' does not exist.`)
+        )
+      )
+      return this
+    }
 
     if ($.preferLocal) {
       const dirs =
@@ -329,15 +347,16 @@ export class ProcessPromise extends Promise<ProcessOutput> {
       stdio:    $.stdio,
       detached: $.detached,
       ee:       $.ee,
-      run(cb, ctx){
-        (self.cmd as unknown as Promise<string>).then?.(
-          cmd => {
-            $.cmd = cmd
+      async run(cb, ctx){
+        try {
+          if (!isString(self.cmd)) {
+            $.cmd = await self.cmd
             ctx.cmd = self.fullCmd
-            cb()
-          },
-          error => self.finalize(ProcessOutput.fromError(error))
-        ) || cb()
+          }
+          cb()
+        } catch (error) {
+          self.finalize(ProcessOutput.fromError(error as Error))
+        }
       },
       on: {
         start: () => {
@@ -488,6 +507,10 @@ export class ProcessPromise extends Promise<ProcessOutput> {
 
   get pid(): number | undefined {
     return this.child?.pid
+  }
+
+  get cwd(): string {
+    return this._snapshot.cwd || this._snapshot[CWD]
   }
 
   get cmd(): string {
@@ -755,22 +778,16 @@ export class ProcessPromise extends Promise<ProcessOutput> {
   // Promise API
   override then<R = ProcessOutput, E = ProcessOutput>(
     onfulfilled?:
-      | ((value: ProcessOutput) => PromiseLike<R> | R)
-      | undefined
-      | null,
+      ((value: ProcessOutput) => PromiseLike<R> | R) | undefined | null,
     onrejected?:
-      | ((reason: ProcessOutput) => PromiseLike<E> | E)
-      | undefined
-      | null
+      ((reason: ProcessOutput) => PromiseLike<E> | E) | undefined | null
   ): Promise<R | E> {
     return super.then(onfulfilled, onrejected)
   }
 
   override catch<T = ProcessOutput>(
     onrejected?:
-      | ((reason: ProcessOutput) => PromiseLike<T> | T)
-      | undefined
-      | null
+      ((reason: ProcessOutput) => PromiseLike<T> | T) | undefined | null
   ): Promise<ProcessOutput | T> {
     return super.catch(onrejected)
   }
@@ -929,7 +946,7 @@ export class ProcessOutput extends Error {
       throw new Fail(
         'Blob is not supported in this environment. Provide a polyfill'
       )
-    return new Blob([this.buffer()], { type })
+    return new Blob([this.buffer() as BlobPart], { type })
   }
 
   text(encoding: Encoding = 'utf8'): string {

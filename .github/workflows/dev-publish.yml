@@ -13,10 +13,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: 'npm'
@@ -24,7 +24,7 @@ jobs:
       - run: npm test
         env:
           FORCE_COLOR: 3
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: build-${{ github.run_id }}
           path: |
@@ -43,7 +43,7 @@ jobs:
       dev: ${{ steps.ref.outputs.ZX_VERSION }}-dev.${{ steps.ref.outputs.SHA_SHORT }}
       lite-dev: ${{ steps.ref.outputs.ZX_VERSION }}-lite-dev.${{ steps.ref.outputs.SHA_SHORT }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - id: ref
@@ -69,10 +69,10 @@ jobs:
       ZX_DEV_VERSION: ${{ needs.version.outputs.dev }}
       ZX_LITE_DEV_VERSION: ${{ needs.version.outputs.lite-dev }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: 'npm'
@@ -81,20 +81,20 @@ jobs:
           echo "//${{ env.GOOGLE_NPM_REGISTRY }}/:_authToken=$GOOGLE_NPM_TOKEN" >> .npmrc
           echo "//${{ env.GH_NPM_REGISTRY }}/:_authToken=$GH_NPM_TOKEN" >> .npmrc
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: build-${{ github.run_id }}
 
       - name: pushing lite snapshot to ${{ env.GOOGLE_NPM_REGISTRY }}
         run: |
           mv -f package-lite.json package.json
-          cat <<< $(jq '.version="${{ env.ZX_LITE_DEV_VERSION }}"' package.json) > package.json
+          cat <<< $(jq '.version="${ZX_LITE_DEV_VERSION}"' package.json) > package.json
           npm publish --provenance --access=public --no-git-tag-version --tag dev --registry https://${{ env.GOOGLE_NPM_REGISTRY }}
 
       - name: pushing to ${{ env.GOOGLE_NPM_REGISTRY }}
         run: |
           mv -f package-main.json package.json
-          cat <<< $(jq '.version="${{ env.ZX_DEV_VERSION }}"' package.json) > package.json
+          cat <<< $(jq '.version="${ZX_DEV_VERSION}"' package.json) > package.json
           npm publish --provenance --access=public --no-git-tag-version --tag dev --registry https://${{ env.GOOGLE_NPM_REGISTRY }}
 
       - name: pushing to ${{ env.GH_NPM_REGISTRY }}
@@ -111,19 +111,19 @@ jobs:
     env:
       ZX_DEV_VERSION: ${{ needs.version.outputs.dev }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: 'npm'
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: build-${{ github.run_id }}
       - name: pushing to jsr.io
         run: |
-          cat <<< $(jq '.version="${{ env.ZX_DEV_VERSION }}"' jsr.json) > jsr.json
+          cat <<< $(jq '.version="${ZX_DEV_VERSION}"' jsr.json) > jsr.json
           npx jsr publish --allow-dirty
 
   # https://docs.github.com/en/actions/use-cases-and-examples/publishing-packages/publishing-docker-images
@@ -144,17 +144,17 @@ jobs:
       ZX_DEV_VERSION: ${{ needs.version.outputs.dev }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: build-${{ github.run_id }}
 
       # Uses the `docker/login-action` action to log in to the Container registry using the account and password that will publish the packages. Once published, the packages are scoped to the account defined here.
       - name: Log in to the Container registry
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -162,7 +162,7 @@ jobs:
       # This step uses [docker/metadata-action](https://github.com/docker/metadata-action#about) to extract tags and labels that will be applied to the specified image. The `id` "meta" allows the output of this step to be referenced in a subsequent step. The `images` value provides the base name for the tags and labels.
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 #v5.7.0
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -183,7 +183,7 @@ jobs:
 
       # This step generates an artifact attestation for the image, which is an unforgeable statement about where and how it was built. It increases supply chain security for people who consume the image. For more information, see [Using artifact attestations to establish provenance for builds](/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds).
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
           subject-digest: ${{ steps.push.outputs.digest }}
